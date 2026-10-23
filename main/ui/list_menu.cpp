@@ -315,6 +315,9 @@ int k85_run_list_menu(const char *title, const char *const items[], int count,
     int64_t b_tap_pending_since = 0;
     int b_tap_pending_sel = 0;
     const int64_t double_tap_window_us = 350000;
+    bool chord_latched = false;   // K85CH1
+    bool a_hold_active = false;
+    int64_t a_hold_last = 0;
     { char k85vb[96]; snprintf(k85vb, sizeof(k85vb), "%s %s", title, items[0]); k85_voice_say(k85vb); } // K85V:enter
 
     while (true) {
@@ -346,6 +349,27 @@ int k85_run_list_menu(const char *title, const char *const items[], int count,
                 return -1;
             }
             if (k85_voice_take_notify()) { k85_voice_flash_ready(); break; }
+            // K85CH1: A+B is an exit gesture only. While both buttons are down nothing else may fire
+            if (k85_check_ab_hold()) { chord_latched = true; b_tap_pending = false; a_hold_active = false; }
+            if (chord_latched) {
+                if (!k85_btn_a_is_down() && !k85_btn_b_is_down()) chord_latched = false;
+                vTaskDelay(pdMS_TO_TICKS(30));
+                continue;
+            }
+            // holding A scrolls backwards (the press itself already moved one step forward, so the first step goes back by two)
+            if (k85_btn_a_is_down() && !k85_btn_b_is_down() && M5.BtnA.isHolding()) {
+                int64_t hn = esp_timer_get_time();
+                bool first = !a_hold_active;
+                if (first || (hn - a_hold_last) >= 160000) {
+                    a_hold_active = true;
+                    a_hold_last = hn;
+                    sel = ((sel - (first ? 2 : 1)) % count + count) % count;
+                    k85_voice_say(items[sel]);
+                    break;
+                }
+            } else {
+                a_hold_active = false;
+            }
             if (k85_btn_a_pressed()) {
                 k85_wake_screen();
                 sel = (sel + 1) % count;

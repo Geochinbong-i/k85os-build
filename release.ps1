@@ -28,6 +28,20 @@ if (-not $m.Success -or $m.Groups[1].Value -ne $Version) {
 }
 Write-Host "version.h = $Version" -ForegroundColor Green
 
+# K85REL1: everything that can stop a release is checked BEFORE the long build
+if ($Publish) {
+  $k85eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  gh auth status 2>&1 | Out-Null
+  $k85auth = $LASTEXITCODE
+  $ErrorActionPreference = $k85eap
+  if ($k85auth -ne 0) { throw 'gh is not logged in (run: gh auth login)' }
+  $k85dirty = git status --porcelain --untracked-files=no
+  if ($LASTEXITCODE -ne 0) { throw 'git status failed' }
+  if ($k85dirty) { Write-Host $k85dirty; throw 'uncommitted changes in tracked files - commit them first, so the release matches the source' }
+  $k85new = git status --porcelain --untracked-files=all -- main CMakeLists.txt partitions.csv sdkconfig.defaults
+  if ($LASTEXITCODE -ne 0) { throw 'git status failed' }
+  if ($k85new) { Write-Host $k85new; throw 'new files that are part of the build are not in git: git add them (or put them in .gitignore)' }
+}
 # ---------- build ----------
 Write-Host "building..." -ForegroundColor Cyan
 Run "idf.py build" { idf.py build }
@@ -84,8 +98,12 @@ if ($dirty) {
   throw "uncommitted changes in tracked files - commit them first, so the release matches the source"
 }
 Run "git push" { git push }
-gh release view $Tag --repo $Repo 2>$null | Out-Null
-if ($LASTEXITCODE -eq 0) { throw "release $Tag already exists on GitHub" }
+$k85eap2 = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+$k85view = (gh release view $Tag --repo $Repo 2>&1 | Out-String)
+$k85code = $LASTEXITCODE
+$ErrorActionPreference = $k85eap2
+if ($k85code -eq 0) { throw "release $Tag already exists on GitHub" }
+if ($k85view -notmatch 'not found') { throw "cannot tell whether release $Tag exists (network or login problem?): $k85view" }
 Run "gh release create" {
   gh release create $Tag (Join-Path $out $binName) (Join-Path $out $sigName) --repo $Repo --title "k85OS $Version" --notes-file $notesOut
 }

@@ -76,7 +76,29 @@ static void try_enable_napt(void) {
     }
 }
 
-static void wifi_event_handler(void *, esp_event_base_t event_base, int32_t event_id, void *event_data) {
+// K85BUG2: uplink reconnect with backoff instead of an instant esp_wifi_connect() loop
+static bool s_sta_retry_on = false;
+static int s_sta_retry_n = 0;
+static esp_timer_handle_t s_sta_retry_timer = nullptr;
+static void sta_retry_cb(void *) { if (s_sta_retry_on) esp_wifi_connect(); }
+static void k85_sta_retry_schedule(void) {
+    if (!s_sta_retry_on) return;
+    if (!s_sta_retry_timer) {
+        esp_timer_create_args_t a = {};
+        a.callback = sta_retry_cb;
+        a.name = "sta_retry";
+        if (esp_timer_create(&a, &s_sta_retry_timer) != ESP_OK) return;
+    }
+    esp_timer_stop(s_sta_retry_timer);
+    int sh = s_sta_retry_n < 5 ? s_sta_retry_n : 5;
+    s_sta_retry_n++;
+    esp_timer_start_once(s_sta_retry_timer, (uint64_t)1000000 << sh);
+}
+static void k85_sta_retry_reset(bool on) {
+    s_sta_retry_on = on;
+    s_sta_retry_n = 0;
+    if (s_sta_retry_timer) esp_timer_stop(s_sta_retry_timer);
+}static void wifi_event_handler(void *, esp_event_base_t event_base, int32_t event_id, void *event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
         wifi_event_ap_staconnected_t *ev = (wifi_event_ap_staconnected_t *)event_data;
         char mac_str[18];
@@ -95,15 +117,19 @@ static void wifi_event_handler(void *, esp_event_base_t event_base, int32_t even
         log_add(mac_str, false);
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         s_sta_got_ip = true;
-        try_enable_napt();
+        s_sta_retry_n = 0;
+        if (s_sta_retry_on) try_enable_napt();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         s_sta_got_ip = false;
-        esp_wifi_connect(); // ????-????????? ???????
+        k85_sta_retry_schedule();
     }
 }
 
 bool k85_router_start(const char *ap_ssid, const char *ap_password, bool ap_open, bool is_guest) {
     if (s_running) return false;
+    // K85BUG2: validate AP settings before touching the radio
+    if (!ap_ssid || !ap_ssid[0]) { k85_log("router: empty AP name"); return false; }
+    if (!ap_open && (!ap_password || strlen(ap_password) < 8)) { k85_log("router: AP password must be 8+ characters"); return false; }
 
     if (!g_config.wifi_saved || g_config.wifi_ssid[0] == '\0') {
         k85_log("router: no saved uplink WiFi, cannot start");
@@ -133,7 +159,7 @@ bool k85_router_start(const char *ap_ssid, const char *ap_password, bool ap_open
 
     wifi_config_t ap_cfg = {};
     snprintf((char *)ap_cfg.ap.ssid, sizeof(ap_cfg.ap.ssid), "%s", ap_ssid);
-    ap_cfg.ap.ssid_len = strlen(ap_ssid);
+    ap_cfg.ap.ssid_len = (uint8_t)strnlen((const char *)ap_cfg.ap.ssid, sizeof(ap_cfg.ap.ssid));
     if (!ap_open) {
         snprintf((char *)ap_cfg.ap.password, sizeof(ap_cfg.ap.password), "%s", ap_password);
         ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
@@ -141,8 +167,14 @@ bool k85_router_start(const char *ap_ssid, const char *ap_password, bool ap_open
         ap_cfg.ap.authmode = WIFI_AUTH_OPEN;
     }
     ap_cfg.ap.max_connection = 4;
-    esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+    esp_err_t k85_ae = esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+    if (k85_ae != ESP_OK) {
+        k85_log("router: AP config rejected (err %d)", (int)k85_ae);
+        esp_wifi_set_mode(WIFI_MODE_STA);
+        return false;
+    }
 
+    k85_sta_retry_reset(true);
     esp_wifi_start();
     esp_wifi_connect();
 
@@ -156,6 +188,7 @@ bool k85_router_start(const char *ap_ssid, const char *ap_password, bool ap_open
 
 void k85_router_stop(void) {
     if (!s_running) return;
+    k85_sta_retry_reset(false);
     esp_wifi_stop();
     s_running = false;
     s_sta_got_ip = false;

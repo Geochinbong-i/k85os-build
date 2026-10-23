@@ -29,11 +29,18 @@ static esp_event_handler_instance_t s_ip_evt_instance = nullptr;
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                 int32_t event_id, void *event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        // K85BUG2: connect only when a network is already configured (empty config gave a false FAIL)
+        wifi_config_t k85_c0 = {};
+        if (esp_wifi_get_config(WIFI_IF_STA, &k85_c0) == ESP_OK && k85_c0.sta.ssid[0]) esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         bool was_connected = s_connected;
         s_connected = false;
-        if (s_wifi_event_group) xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+        {
+            // K85BUG2: our own esp_wifi_disconnect() reports ASSOC_LEAVE - that is not a connection failure
+            const wifi_event_sta_disconnected_t *k85_d = (const wifi_event_sta_disconnected_t *)event_data;
+            bool k85_own = (k85_d && k85_d->reason == WIFI_REASON_ASSOC_LEAVE);
+            if (s_wifi_event_group && !k85_own) xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+        }
         k85_log("WiFi disconnected");
         if (was_connected) k85_notify("WiFi disconnected");
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
@@ -92,13 +99,22 @@ static bool wifi_do_connect(const char *ssid, const char *password) {
     xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
 
     wifi_config_t wifi_config = {};
+    // K85BUG2: null-safe copy, open networks allowed
+    if (!ssid || !ssid[0]) return false;
+    if (!password) password = "";
     strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
     strncpy((char *)wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    wifi_config.sta.threshold.authmode = password[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
 
     esp_wifi_disconnect();
     esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
-    esp_wifi_connect();
+    esp_err_t k85_ce = esp_wifi_connect();
+    if (k85_ce == ESP_ERR_WIFI_NOT_STARTED) {
+        // K85BUG2: driver was stopped elsewhere (router stop) - start it again
+        esp_wifi_set_mode(WIFI_MODE_STA);
+        esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+        if (esp_wifi_start() == ESP_OK) esp_wifi_connect();
+    }
 
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
                                             WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,

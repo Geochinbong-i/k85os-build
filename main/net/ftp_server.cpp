@@ -624,7 +624,7 @@ static void ftp_task(void *arg) {
 }
 
 bool k85_ftp_has_login(void) {
-    char u[40], h[72];
+    char u[40], h[110];  // K85FTP1: same size as the hash buffer in do_pass
     return k85_svc_get_str("ftp_user", u, sizeof(u)) && k85_svc_get_str("ftp_hash", h, sizeof(h));
 }
 

@@ -10,8 +10,9 @@ static uint32_t now_ms(void) {
 
 void k85_input_update(void) { M5.update(); }
 
-bool k85_btn_a_pressed(void) { return M5.BtnA.wasPressed(); }
-bool k85_btn_b_pressed(void) { return M5.BtnB.wasPressed(); }
+// K85CH1: a press made while the other button is held belongs to the A+B gesture, not to a single button
+bool k85_btn_a_pressed(void) { return M5.BtnA.wasPressed() && !M5.BtnB.isPressed(); }
+bool k85_btn_b_pressed(void) { return M5.BtnB.wasPressed() && !M5.BtnA.isPressed(); }
 bool k85_btn_a_is_down(void) { return M5.BtnA.isPressed(); }
 bool k85_btn_b_is_down(void) { return M5.BtnB.isPressed(); }
 

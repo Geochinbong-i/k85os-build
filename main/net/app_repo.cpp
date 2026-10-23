@@ -69,6 +69,7 @@ bool k85_apprepo_fetch_uefi_theme_list(char out_names[][64], char out_urls[][256
     cfg.event_handler = http_event_handler;
     cfg.user_data = &buf;
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.buffer_size_tx = 2048;  // K85NET1: long GitHub redirect URLs
     cfg.timeout_ms = 20000;
     cfg.user_agent = "k85OS-device";
 
@@ -147,6 +148,7 @@ bool k85_apprepo_fetch_app_list(char out_names[][64], char out_urls[][256], char
     cfg.event_handler = http_event_handler;
     cfg.user_data = &buf;
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.buffer_size_tx = 2048;  // K85NET1: long GitHub redirect URLs
     cfg.timeout_ms = 20000;
     cfg.user_agent = "k85OS-device";
 
@@ -182,6 +184,8 @@ bool k85_apprepo_fetch_app_list(char out_names[][64], char out_urls[][256], char
         cJSON *name = cJSON_GetObjectItem(asset, "name");
         cJSON *dl_url = cJSON_GetObjectItem(asset, "browser_download_url");
         if (!cJSON_IsString(name) || !cJSON_IsString(dl_url)) continue;
+        size_t k85_nl = strlen(name->valuestring);   // K85-05: signature files are metadata, not packages
+        if (k85_nl > 4 && strcmp(name->valuestring + k85_nl - 4, ".sig") == 0) continue;
         snprintf(out_names[found], 64, "%s", name->valuestring);
         snprintf(out_urls[found], 256, "%s", dl_url->valuestring);
 
@@ -210,10 +214,11 @@ bool k85_apprepo_fetch_app_list(char out_names[][64], char out_urls[][256], char
 // отдавать бесконечный поток и забить LittleFS до отказа.
 #define K85_APPREPO_MAX_DOWNLOAD_BYTES (4 * 1024 * 1024) // 4MB - с запасом под самый крупный ожидаемый .bin
 
-bool k85_apprepo_download_file(const char *url, const char *dest_path) {
+bool k85_apprepo_download_file(const char *url, const char *dest_path) {   // K85AUD1: temp file + every write checked
     esp_http_client_config_t cfg = {};
     cfg.url = url;
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.buffer_size_tx = 2048;  // K85NET1: long GitHub redirect URLs
     cfg.timeout_ms = 20000;
     cfg.user_agent = "k85OS-device";
 
@@ -229,14 +234,14 @@ bool k85_apprepo_download_file(const char *url, const char *dest_path) {
 
     int status = esp_http_client_get_status_code(client);
     if (status != 200) {
-        // Не 200 OK - например, 404-страница вместо реального файла.
-        // Раньше это молча сохранялось как "файл", теперь явный провал.
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
         return false;
     }
 
-    FILE *f = fopen(dest_path, "wb");
+    char tmp_path[272];
+    snprintf(tmp_path, sizeof(tmp_path), "%.255s.tmp", dest_path);
+    FILE *f = fopen(tmp_path, "wb");
     if (!f) {
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
@@ -249,17 +254,17 @@ bool k85_apprepo_download_file(const char *url, const char *dest_path) {
     long total = 0;
     while ((r = esp_http_client_read(client, buf, sizeof(buf))) > 0) {
         total += r;
-        if (total > K85_APPREPO_MAX_DOWNLOAD_BYTES) {
-            ok = false;
-            break;
-        }
-        fwrite(buf, 1, r, f);
+        if (total > K85_APPREPO_MAX_DOWNLOAD_BYTES) { ok = false; break; }
+        if (fwrite(buf, 1, (size_t)r, f) != (size_t)r) { ok = false; break; }
     }
     if (r < 0) ok = false;
-
-    fclose(f);
-    if (!ok) remove(dest_path); // не оставляем обрезанный/незавершённый файл на диске
+    if (ferror(f)) ok = false;
+    if (fclose(f) != 0) ok = false;
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
-    return ok;
+
+    if (!ok) { remove(tmp_path); return false; }
+    remove(dest_path);
+    if (rename(tmp_path, dest_path) != 0) { remove(tmp_path); return false; }
+    return true;
 }

@@ -54,6 +54,7 @@ static bool fetch_latest_release_json(char *out, size_t out_cap) {
     cfg.event_handler = http_event_handler;
     cfg.user_data = &buf;
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.buffer_size_tx = 2048;  // K85NET1: long GitHub redirect URLs
     cfg.timeout_ms = 8000;
     cfg.user_agent = "k85OS-device";
 

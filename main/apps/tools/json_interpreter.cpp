@@ -374,7 +374,14 @@ void k85_run_json_interpreter(void) {
         return;
     }
     size_t r = fread(buf, 1, K85_JSON_BUF_SIZE - 1, f);
+    bool k85_too_big = (fgetc(f) != EOF);   // K85-06: more data left than the buffer holds
     fclose(f);
+    if (k85_too_big) {
+        heap_caps_free(buf);
+        k85_show_message("Game file too large\n(max 16 KB)\nA+B=back");
+        wait_ab_exit();
+        return;
+    }
     buf[r] = 0;
 
     run_game_from_json(buf);

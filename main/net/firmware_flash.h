@@ -24,3 +24,8 @@ bool k85_fwflash_stream_end(void); // ВСЕГДА возвращает false - 
 void k85_fwflash_stream_abort(void); // прервать и откатить незавершённую запись
 // Метка неактивного (свободного) слота - для отображения в UI.
 const char *k85_fwflash_free_slot_label(void);
+
+// K85TP1: UNSIGNED third-party image (plain app .bin or full flash image) into the free slot; never activates it.
+// info receives the SHA-256 hex of the file (65+ bytes) on success, an error text on failure. Local use only.
+bool k85_fwflash_install_thirdparty(const char *url, k85_fwflash_progress_cb cb, char *info, size_t info_cap);
+void k85_run_thirdparty_flash(void);

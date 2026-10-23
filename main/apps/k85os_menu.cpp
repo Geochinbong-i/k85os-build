@@ -41,6 +41,29 @@ using namespace k85;
 #define K85_BIOS_ITEM_COUNT 24
 #define K85_BIOS_VISIBLE_ROWS 6
 
+// K85CP1: copy through a temp file, check every step, replace the target only after a complete copy
+static bool k85_copy_safe(const char *src, const char *dst) {
+    char tmp[300];
+    snprintf(tmp, sizeof(tmp), "%.280s.tmp", dst);
+    FILE *fs = fopen(src, "rb");
+    if (!fs) return false;
+    FILE *fd = fopen(tmp, "wb");
+    if (!fd) { fclose(fs); return false; }
+    char buf[256];
+    size_t r;
+    bool ok = true;
+    while ((r = fread(buf, 1, sizeof(buf), fs)) > 0) {
+        if (fwrite(buf, 1, r, fd) != r) { ok = false; break; }
+    }
+    if (ferror(fs)) ok = false;
+    fclose(fs);
+    if (fclose(fd) != 0) ok = false;
+    if (!ok) { remove(tmp); return false; }
+    remove(dst);
+    if (rename(tmp, dst) != 0) { remove(tmp); return false; }
+    return true;
+}
+
 static const char *k85_bios_labels[K85_BIOS_ITEM_COUNT] = {
     "WiFi module", "Bluetooth module", "OTA lock (soft)",
     "RAM / ROM info", "Chip info", "Uptime",
@@ -281,15 +304,11 @@ static void run_update_uefi_theme(void) {
         return;
     }
 
-    FILE *fsrc = fopen(dest, "rb");
-    FILE *fdst = fopen(K85_BIOS_THEME_ACTIVE_FILE, "wb");
-    if (fsrc && fdst) {
-        char buf[256];
-        size_t r;
-        while ((r = fread(buf, 1, sizeof(buf), fsrc)) > 0) fwrite(buf, 1, r, fdst);
+    if (!k85_copy_safe(dest, K85_BIOS_THEME_ACTIVE_FILE)) {
+        k85_show_message("Theme copy failed\nA+B=back");
+        wait_ab_exit();
+        return;
     }
-    if (fsrc) fclose(fsrc);
-    if (fdst) fclose(fdst);
 
     s_bios_theme = k85_bios_theme_load();
 

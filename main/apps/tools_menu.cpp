@@ -19,6 +19,7 @@
 #include "tools/bt_scan.h"
 #include "tools/terminal.h"
 #include "tools/ir_remote.h"
+#include "net/firmware_flash.h"
 #include "../net/ssh_client.h"
 #include "tools/task_manager.h"
 #include "tools/lora_tool.h"
@@ -44,7 +45,7 @@
 static const char *TOOLS_ITEMS[] = {
     "WiFi Manager", "Color Test", "Bluetooth Scan", "I2C Scanner",
     "GPIO Control", "Files", "Music Player", "Melodies", "Mic Test",
-    "Air Mouse (screen)", "Air Mouse BLE", "WiFi Hotspot", "Calculator", "Terminal", "IR Remote", "Task Manager", "LoRa", "Internet SDR", "Web Radio", "Web Terminal", "Level", "Ping", "Authenticator", "Password Manager", "Orientation", "MQTT", "Disk Cleanup", "Services", "Package Manager", "FTP Server", "Audio", "Performance", "Device Manager", "Back"
+    "Air Mouse (screen)", "Air Mouse BLE", "WiFi Hotspot", "Calculator", "Terminal", "IR Remote", "Task Manager", "LoRa", "Internet SDR", "Web Radio", "Web Terminal", "Level", "Ping", "Authenticator", "Password Manager", "Orientation", "MQTT", "Disk Cleanup", "Services", "Package Manager", "FTP Server", "Audio", "Performance", "Device Manager", "Other Firmware", "Back"
 };
 #define TOOLS_COUNT (int)(sizeof(TOOLS_ITEMS) / sizeof(TOOLS_ITEMS[0]))
 
@@ -266,6 +267,7 @@ void k85_run_tools_menu(void) {
             else if (idx == 15) k85_run_task_manager();
         else if (idx == 16) k85_run_lora_tool();
         else if (idx == 17) k85_run_kiwisdr_client();
+        else if (idx == 33) k85_run_thirdparty_flash();
         else if (idx == 18) k85_run_web_radio();
         else if (idx == 19) k85_run_web_terminal();
         else if (idx == 20) k85_run_level();

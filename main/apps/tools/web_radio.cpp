@@ -1,4 +1,5 @@
 #include "web_radio.h"
+#include <cstdarg>
 #include "esp_attr.h"
 #include "../../net/wifi.h"
 #include "list_menu.h"
@@ -199,6 +200,18 @@ static void do_connect_internal(const char *host, int port) {
     }
 }
 
+// K85BUG1: snprintf returns the length it WOULD have written; "used += snprintf(...)" then runs past the buffer
+// and "size - used" wraps around. This variant returns only what really fits.
+static size_t clamped_snprintf(char *buf, size_t size, const char *fmt, ...) {
+    if (size == 0) return 0;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, size, fmt, ap);
+    va_end(ap);
+    if (n < 0) return 0;
+    return (size_t)n >= size ? size - 1 : (size_t)n;
+}
+
 #define K85_WR_SCAN_POINTS 21
 #define K85_WR_SCAN_STEP_KHZ 5
 
@@ -207,7 +220,7 @@ static void do_scan_internal(char *json_out, size_t json_out_size) {
     int center = s_freq_khz;
     int saved_mode = s_mode_idx;
     size_t used = 0;
-    used += snprintf(json_out + used, json_out_size - used, "[");
+    used += clamped_snprintf(json_out + used, json_out_size - used, "[");
 
     for (int i = 0; i < K85_WR_SCAN_POINTS; i++) {
         int f = center + (i - K85_WR_SCAN_POINTS / 2) * K85_WR_SCAN_STEP_KHZ;
@@ -215,7 +228,7 @@ static void do_scan_internal(char *json_out, size_t json_out_size) {
         send_retune_internal(f, saved_mode);
         vTaskDelay(pdMS_TO_TICKS(220));
         int level = s_smeter_raw;
-        used += snprintf(json_out + used, json_out_size - used,
+        used += clamped_snprintf(json_out + used, json_out_size - used,
                           "%s{\"freq\":%d,\"level\":%d}", i == 0 ? "" : ",", f, level);
         if (used >= json_out_size - 64) break;
     }
@@ -553,10 +566,10 @@ static void handle_connection(int conn_fd) {
                  s_muted ? "true" : "false", (int)s_smeter_raw);
         send_http(conn_fd, "200 OK", "application/json", body);
     } else if (!strcmp(path, "/api/presets")) {
-        char body[512];
+        static EXT_RAM_BSS_ATTR char body[1536];
         size_t used = snprintf(body, sizeof(body), "[");
         for (int i = 0; i < K85_WR_PRESET_COUNT; i++) {
-            used += snprintf(body + used, sizeof(body) - used,
+            used += clamped_snprintf(body + used, sizeof(body) - used,
                               "%s{\"name\":\"%s\",\"host\":\"%s\",\"port\":%d}",
                               i == 0 ? "" : ",", K85_WR_PRESETS[i].name, K85_WR_PRESETS[i].host, K85_WR_PRESETS[i].port);
         }

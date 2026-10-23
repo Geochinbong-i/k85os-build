@@ -34,6 +34,29 @@ struct FbEntry {
     long size;
 };
 
+// K85CP1: copy through a temp file, check every step, replace the target only after a complete copy
+static bool k85_copy_safe(const char *src, const char *dst) {
+    char tmp[300];
+    snprintf(tmp, sizeof(tmp), "%.280s.tmp", dst);
+    FILE *fs = fopen(src, "rb");
+    if (!fs) return false;
+    FILE *fd = fopen(tmp, "wb");
+    if (!fd) { fclose(fs); return false; }
+    char buf[256];
+    size_t r;
+    bool ok = true;
+    while ((r = fread(buf, 1, sizeof(buf), fs)) > 0) {
+        if (fwrite(buf, 1, r, fd) != r) { ok = false; break; }
+    }
+    if (ferror(fs)) ok = false;
+    fclose(fs);
+    if (fclose(fd) != 0) ok = false;
+    if (!ok) { remove(tmp); return false; }
+    remove(dst);
+    if (rename(tmp, dst) != 0) { remove(tmp); return false; }
+    return true;
+}
+
 static void wait_ab_exit(void) {
     while (true) {
         k85_input_update();
@@ -429,18 +452,7 @@ static void copy_sd_to_flash(void) {
     snprintf(src, sizeof(src), "/sd/%s", names[idx]);
     snprintf(dst, sizeof(dst), "/littlefs/%s", names[idx]);
 
-    FILE *fsrc = fopen(src, "rb");
-    if (!fsrc) { k85_show_message("Copy error:\nopen src"); return; }
-    FILE *fdst = fopen(dst, "wb");
-    if (!fdst) { fclose(fsrc); k85_show_message("Copy error:\nopen dst"); return; }
-
-    char buf[512];
-    size_t r;
-    while ((r = fread(buf, 1, sizeof(buf), fsrc)) > 0) {
-        fwrite(buf, 1, r, fdst);
-    }
-    fclose(fsrc);
-    fclose(fdst);
+    if (!k85_copy_safe(src, dst)) { k85_show_message("Copy failed\n(disk full?)"); return; }
     k85_log("Copied %s -> %s", src, dst);
 
     char msg[96];
@@ -522,15 +534,11 @@ static void apply_bios_theme_picker(void) {
     char src[192];
     snprintf(src, sizeof(src), "/littlefs/bios/%s", names[idx]);
 
-    FILE *fsrc = fopen(src, "rb");
-    FILE *fdst = fopen(K85_BIOS_THEME_ACTIVE_FILE, "wb");
-    if (fsrc && fdst) {
-        char buf[256];
-        size_t r;
-        while ((r = fread(buf, 1, sizeof(buf), fsrc)) > 0) fwrite(buf, 1, r, fdst);
+    if (!k85_copy_safe(src, K85_BIOS_THEME_ACTIVE_FILE)) {
+        k85_show_message("Theme copy failed\nA+B=back");
+        while (true) { k85_input_update(); if (k85_ab_held(500)) { k85_wait_ab_release(); break; } vTaskDelay(pdMS_TO_TICKS(30)); }
+        return;
     }
-    if (fsrc) fclose(fsrc);
-    if (fdst) fclose(fdst);
 
     g_config.bios_bg_color = 0xFFFFFFFF;
     g_config.bios_hl_color = 0xFFFFFFFF;
@@ -585,15 +593,11 @@ static void apply_grub_theme_picker(void) {
     char src[192];
     snprintf(src, sizeof(src), "/littlefs/grub/%s", names[idx]);
 
-    FILE *fsrc = fopen(src, "rb");
-    FILE *fdst = fopen(K85_BOOT_THEME_ACTIVE_FILE, "wb");
-    if (fsrc && fdst) {
-        char buf[256];
-        size_t r;
-        while ((r = fread(buf, 1, sizeof(buf), fsrc)) > 0) fwrite(buf, 1, r, fdst);
+    if (!k85_copy_safe(src, K85_BOOT_THEME_ACTIVE_FILE)) {
+        k85_show_message("Theme copy failed\nA+B=back");
+        while (true) { k85_input_update(); if (k85_ab_held(500)) { k85_wait_ab_release(); break; } vTaskDelay(pdMS_TO_TICKS(30)); }
+        return;
     }
-    if (fsrc) fclose(fsrc);
-    if (fdst) fclose(fdst);
 
     char msg[64];
     snprintf(msg, sizeof(msg), "GRUB theme applied:\n%.35s\nA+B=back", names[idx]);

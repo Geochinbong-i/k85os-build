@@ -326,14 +326,14 @@ static bool handle_upload_body(int conn_fd, const char *header,
             if (write_len >= 2 && buf[write_len - 2] == '\r' && buf[write_len - 1] == '\n') {
                 write_len -= 2;
             }
-            if (write_len > 0) fwrite(buf, 1, write_len, f);
+            if (write_len > 0 && fwrite(buf, 1, write_len, f) != (size_t)write_len) { k85_log("upload: write failed (storage full?)"); ok = false; break; }  // K85UP1
             total_written += write_len;
             ok = true;
             break;
         }
         long safe_len = have - (delim_len + 2);
         if (safe_len > 0) {
-            fwrite(buf, 1, safe_len, f);
+            if (fwrite(buf, 1, safe_len, f) != (size_t)safe_len) { k85_log("upload: write failed (storage full?)"); ok = false; break; }
             total_written += safe_len;
             memmove(buf, buf + safe_len, have - safe_len);
             have -= safe_len;

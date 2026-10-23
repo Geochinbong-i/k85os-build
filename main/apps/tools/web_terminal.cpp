@@ -128,6 +128,18 @@ static const char *K85_LOGIN_HTML =
     "<button type=submit>Enter</button>"
     "</form></body></html>";
 
+// K85CSRF1: /api/exec only answers requests that carry our own header. A page from another site cannot add it
+// without a CORS preflight, and this server never approves one. Only the header block is searched (not the body).
+static bool k85_has_term_hdr(const char *req) {
+    const char *p = strstr(req, "\r\n");
+    while (p) {
+        p += 2;
+        if (p[0] == '\r' && p[1] == '\n') break;
+        if (strncasecmp(p, "x-k85:", 6) == 0) return true;
+        p = strstr(p, "\r\n");
+    }
+    return false;
+}
 static const char *K85_TERM_PAGE = R"HTML(<!DOCTYPE html><html><head><meta charset='UTF-8'>
 <meta name=viewport content='width=device-width,initial-scale=1'>
 <title>k85OS Terminal</title>
@@ -160,7 +172,7 @@ async function sendCmd() {
   appendLine('\n$ ' + cmd + '\n');
   cmdBox.value = '';
   try {
-    const r = await fetch('/api/exec?cmd=' + encodeURIComponent(cmd));
+    const r = await fetch('/api/exec?cmd=' + encodeURIComponent(cmd), { headers: { 'X-K85': '1' } });
     const j = await r.json();
     appendLine(j.output || '(no output)');
   } catch(e) {
@@ -196,6 +208,20 @@ static void handle_connection(int conn_fd) {
         headers_end = find_bytes(req_buf, req_len, "\r\n\r\n", 4);
     }
     if (headers_end < 0) return;
+    // K85-01: the POST body can arrive in a later TCP segment than the headers: read it before parsing
+    {
+        long k85_want = -1;
+        for (const char *h = req_buf; h < req_buf + headers_end; h++) {
+            if ((h[0] | 32) == 'c' && strncasecmp(h, "content-length:", 15) == 0) { k85_want = strtol(h + 15, nullptr, 10); break; }
+        }
+        while (k85_want > 0 && req_len - (headers_end + 4) < k85_want && req_len < (long)sizeof(req_buf) - 1) {
+            if (esp_timer_get_time() > s_conn_deadline_us) break;
+            int k85_r = recv(conn_fd, req_buf + req_len, sizeof(req_buf) - 1 - req_len, 0);
+            if (k85_r <= 0) break;
+            req_len += k85_r;
+            req_buf[req_len] = 0;
+        }
+    }
 
     char method[8] = {0}, path_full[256] = {0};
     sscanf(req_buf, "%7s %255s", method, path_full);
@@ -253,6 +279,7 @@ static void handle_connection(int conn_fd) {
     if (strcmp(path, "/") == 0) {
         send_http(conn_fd, "200 OK", "text/html", K85_TERM_PAGE);
     } else if (strcmp(path, "/api/exec") == 0) {
+        if (!k85_has_term_hdr(req_buf)) { send_http(conn_fd, "403 Forbidden", "text/plain", "Forbidden"); return; }
         char cmd_enc[80] = {0}, cmd[80] = {0};
         get_param(query, "cmd", cmd_enc, sizeof(cmd_enc));
         url_decode(cmd_enc, cmd, sizeof(cmd));
@@ -269,6 +296,8 @@ static void handle_connection(int conn_fd) {
             if (*p == '"' || *p == '\\') { json_out[oi++] = '\\'; json_out[oi++] = *p; }
             else if (*p == '\r') continue;
             else if (*p == '\n') { json_out[oi++] = '\\'; json_out[oi++] = 'n'; }
+            else if (*p == '\t') { json_out[oi++] = '\\'; json_out[oi++] = 't'; }  // K85JSON1
+            else if ((unsigned char)*p < 0x20) continue;
             else json_out[oi++] = *p;
         }
         oi += snprintf(json_out + oi, sizeof(json_out) - oi, "\"}");

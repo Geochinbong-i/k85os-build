@@ -1,4 +1,4 @@
-﻿#include "kiwisdr_client.h"
+#include "kiwisdr_client.h"
 #include "list_menu.h"
 #include "text_input.h"
 #include "common.h"
@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
+#include "esp_log.h" // K85BUG5: mirror key events to serial (tag kiwi)
 
 #include <cstdio>
 #include <cstring>
@@ -30,7 +31,8 @@ static const K85KiwiPreset K85_KIWI_PRESETS[] = {
 };
 #define K85_KIWI_PRESET_COUNT (int)(sizeof(K85_KIWI_PRESETS) / sizeof(K85_KIWI_PRESETS[0]))
 
-#define K85_KIWI_AUDIO_BUF_SAMPLES 2048
+#define K85_KIWI_AUDIO_BUF_SAMPLES 1024
+#define K85_KIWI_NBUF 8
 #define K85_KIWI_RETUNE_REPEAT_MS 150
 #define K85_KIWI_DOUBLE_TAP_WINDOW_US 350000
 
@@ -45,7 +47,7 @@ static const K85KiwiMode K85_KIWI_MODES[] = {
 
 // Ступени громкости именно для этого инструмента - независимо от системной
 // громкости (та не трогается). 255 = аппаратный максимум M5.Speaker.
-static const uint8_t K85_KIWI_VOL_LEVELS[] = { 250, 200, 150, 100, 50, 0 };
+static const uint8_t K85_KIWI_VOL_LEVELS[] = { 160, 120, 80, 50, 25, 0 };
 #define K85_KIWI_VOL_LEVELS_COUNT (int)(sizeof(K85_KIWI_VOL_LEVELS) / sizeof(K85_KIWI_VOL_LEVELS[0]))
 
 #define K85_SPECTRUM_BANDS 16
@@ -81,10 +83,27 @@ static_assert(sizeof(StackType_t) == 1,
 static StaticTask_t s_kiwi_task_buf;
 static StackType_t *s_kiwi_task_stack = nullptr;
 
-static int16_t s_audio_buf[2][K85_KIWI_AUDIO_BUF_SAMPLES];
+static int16_t s_audio_buf[K85_KIWI_NBUF][K85_KIWI_AUDIO_BUF_SAMPLES];
 static volatile int s_fill_idx = 0;
 static volatile int s_fill_pos = 0;
-static volatile bool s_buf_ready[2] = { false, false };
+// K85BUG9: ring of buffers; a buffer is reused only after the speaker has finished playing it
+static volatile int s_buf_state[K85_KIWI_NBUF] = {0};
+static int s_q[2] = {0, 0};
+static int s_qn = 0;
+static int s_play_idx = 0;
+static bool s_primed = false;
+
+// K85BUG4: the ws client task holds its lock while it polls the socket (up to 1 s while the server is silent,
+// e.g. before auth), so a 1 s send timeout fails exactly during the handshake. Wait longer and retry once.
+static int kiwi_send(const char *msg) {
+    int r = -1;
+    for (int i = 0; i < 2 && s_ws; i++) {
+        r = esp_websocket_client_send_text(s_ws, msg, strlen(msg), pdMS_TO_TICKS(2500));
+        if (r >= 0) break;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    return r;
+}
 
 static float s_spectrum[K85_SPECTRUM_BANDS] = {0};
 static const float K85_SPECTRUM_FREQS[K85_SPECTRUM_BANDS] = {
@@ -99,7 +118,8 @@ static void send_retune(void) {
     char cmd[128];
     snprintf(cmd, sizeof(cmd), "SET mod=%s low_cut=%d high_cut=%d freq=%d.000",
              m.kiwi_mod, m.low_cut, m.high_cut, s_freq_khz);
-    int ret = esp_websocket_client_send_text(s_ws, cmd, strlen(cmd), pdMS_TO_TICKS(1000));
+    int ret = kiwi_send(cmd);
+    ESP_LOGW("kiwi", "retune '%s' ret=%d", cmd, ret);
     k85_log("kiwisdr: sent retune '%s' -> ret=%d", cmd, ret);
 }
 
@@ -141,7 +161,9 @@ static void compute_spectrum(const int16_t *buf, int n) {
 }
 
 #define K85_KIWI_AUDIO_HEADER_SKIP 10
-#define K85_KIWI_SOFT_GAIN 6.0f // программное усиление - независимо от громкости динамика
+// K85BUG3: log only the first few frames per connection
+static int s_dbg_frames = 0;
+#define K85_KIWI_SOFT_GAIN 3.0f // программное усиление - независимо от громкости динамика
 
 static void apply_gain(int16_t *buf, int n, float gain) {
     for (int i = 0; i < n; i++) {
@@ -152,18 +174,42 @@ static void apply_gain(int16_t *buf, int n, float gain) {
     }
 }
 
+// K85BUG7: the server announces audio_rate only after its config is loaded; audio setup must follow it
+static volatile bool s_need_setup = false;
+static volatile bool s_setup_done = false;
+static volatile int64_t s_conn_us = 0;
+static bool k85_has(const uint8_t *d, int n, const char *needle) {
+    int m = (int)strlen(needle);
+    for (int i = 0; i + m <= n; i++) if (memcmp(d + i, needle, m) == 0) return true;
+    return false;
+}
+
 static void handle_audio_frame(const uint8_t *data, int len) {
     static bool logged_once = false;
     if (!logged_once) {
         logged_once = true;
         k85_log("kiwisdr: FIRST FRAME len=%d bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
-                 len, data[0], data[1],
+                 len, data[0], len > 1 ? data[1] : 0,
                  len > 2 ? data[2] : 0, len > 3 ? data[3] : 0, len > 4 ? data[4] : 0,
                  len > 5 ? data[5] : 0, len > 6 ? data[6] : 0, len > 7 ? data[7] : 0,
                  len > 8 ? data[8] : 0, len > 9 ? data[9] : 0);
     }
+    if (len > 4 && memcmp(data, "MSG", 3) == 0) {
+        ESP_LOGW("kiwi", "MSG: %.*s", len > 200 ? 196 : len - 4, (const char *)data + 4);
+        if (k85_has(data, len > 200 ? 200 : len, "audio_rate=")) s_need_setup = true;
+    }
     if (len <= K85_KIWI_AUDIO_HEADER_SKIP) return;
     if (memcmp(data, "SND", 3) != 0) return;
+    {
+        static int64_t snd_t0 = 0;
+        static int snd_n = 0, snd_bytes = 0;
+        int64_t snd_now = esp_timer_get_time();
+        snd_n++; snd_bytes += len;
+        if (snd_now - snd_t0 > 2000000) {
+            ESP_LOGW("kiwi", "SND frames=%d bytes=%d in %lld ms", snd_n, snd_bytes, (long long)((snd_now - snd_t0) / 1000));
+            snd_t0 = snd_now; snd_n = 0; snd_bytes = 0;
+        }
+    }
 
     // KiwiSDR шлёт PCM-сэмплы в big-endian (сетевой порядок байт), а ESP32 -
     // little-endian. Прямой каст указателя (int16_t*) читал бы байты в
@@ -172,12 +218,13 @@ static void handle_audio_frame(const uint8_t *data, int len) {
     int n_samples = (len - K85_KIWI_AUDIO_HEADER_SKIP) / 2;
 
     for (int i = 0; i < n_samples; i++) {
+        if (s_buf_state[s_fill_idx] != 0) break;
         int16_t sample = (int16_t)((sample_bytes[i * 2] << 8) | sample_bytes[i * 2 + 1]);
         s_audio_buf[s_fill_idx][s_fill_pos] = sample;
         s_fill_pos++;
         if (s_fill_pos >= K85_KIWI_AUDIO_BUF_SAMPLES) {
-            s_buf_ready[s_fill_idx] = true;
-            s_fill_idx = 1 - s_fill_idx;
+            s_buf_state[s_fill_idx] = 1;
+            s_fill_idx = (s_fill_idx + 1) % K85_KIWI_NBUF;
             s_fill_pos = 0;
         }
     }
@@ -190,26 +237,45 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base, int32_t 
             k85_log("kiwisdr: ws BEGIN");
             break;
         case WEBSOCKET_EVENT_CONNECTED:
+            ESP_LOGW("kiwi", "ws CONNECTED");
             k85_log("kiwisdr: ws CONNECTED");
             s_connected = true;
             s_need_handshake = true; // хендшейк отправит фоновый поток, НЕ отсюда - иначе lock timeout
             break;
         case WEBSOCKET_EVENT_DATA:
-            k85_log("kiwisdr: DATA op=%d len=%d payload_off=%d payload_len=%d",
+            if (data->payload_offset == 0 && (data->op_code != 0x02 || s_dbg_frames++ < 3)) k85_log("kiwisdr: DATA op=%d len=%d payload_off=%d payload_len=%d",
                      data->op_code, data->data_len, data->payload_offset, data->payload_len);
+            // K85BUG6: show control frames; a CLOSE frame carries the close code
+            if (data->op_code == 0x08 || data->op_code == 0x09 || data->op_code == 0x0A) {
+                const uint8_t *cp = (const uint8_t *)data->data_ptr;
+                int ccode = (data->data_len >= 2 && cp) ? ((cp[0] << 8) | cp[1]) : -1;
+                ESP_LOGW("kiwi", "ctrl frame op=%d len=%d code=%d", (int)data->op_code, (int)data->data_len, ccode);
+            }
             if (data->op_code == 0x02 && data->data_len > 0) {
-                handle_audio_frame((const uint8_t *)data->data_ptr, data->data_len);
+                // K85BUG8: a frame can arrive split into several chunks (payload_offset > 0): collect it, then parse
+                static uint8_t k85_frame[1280];
+                int k85_off = data->payload_offset, k85_n = data->data_len, k85_tot = data->payload_len;
+                if (k85_tot <= (int)sizeof(k85_frame) && k85_off >= 0 && k85_off + k85_n <= k85_tot) {
+                    memcpy(k85_frame + k85_off, data->data_ptr, k85_n);
+                    if (k85_off + k85_n == k85_tot) handle_audio_frame(k85_frame, k85_tot);
+                }
             } else if (data->op_code == 0x01 && data->data_len > 0) {
                 // текстовый ответ сервера - полезно для диагностики хендшейка
+                ESP_LOGW("kiwi", "TEXT: %.*s", data->data_len, (const char *)data->data_ptr);
                 k85_log("kiwisdr: TEXT: %.*s", data->data_len, (const char *)data->data_ptr);
             }
             break;
+        case WEBSOCKET_EVENT_CLOSED:
+            ESP_LOGW("kiwi", "ws CLOSED (clean close)");
+            break;
         case WEBSOCKET_EVENT_DISCONNECTED:
+            ESP_LOGW("kiwi", "ws DISCONNECTED");
             k85_log("kiwisdr: ws DISCONNECTED");
             s_connected = false;
             break;
         case WEBSOCKET_EVENT_ERROR:
             s_ws_error_code = (int)data->error_handle.esp_ws_handshake_status_code;
+            ESP_LOGW("kiwi", "ws ERROR, handshake_status=%d", s_ws_error_code);
             k85_log("kiwisdr: ws ERROR, handshake_status=%d", s_ws_error_code);
             s_connected = false;
             s_connect_failed = true;
@@ -223,6 +289,7 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base, int32_t 
 // единственного владельца s_ws. UI-поток (run_session) никогда не трогает
 // esp_websocket_client_* напрямую, только выставляет s_want_* флаги. ----------
 static void do_connect_internal(void) {
+    s_dbg_frames = 0;
     s_connect_failed = false;
 
     if (s_ws) {
@@ -267,15 +334,30 @@ static void do_disconnect_internal(void) {
 }
 
 static void do_handshake_internal(void) {
-    const char *auth = "SET auth t=kiwi p=";
-    int r1 = esp_websocket_client_send_text(s_ws, auth, strlen(auth), pdMS_TO_TICKS(1000));
-    k85_log("kiwisdr: sent auth ret=%d", r1);
+    if (!s_ws) return;
+    s_setup_done = false;
+    s_need_setup = false;
+    s_conn_us = esp_timer_get_time();
+    int r0 = kiwi_send("SET auth t=kiwi p=");
+    ESP_LOGW("kiwi", "auth ret=%d", r0);
+    k85_log("kiwisdr: sent auth ret=%d", r0);
+}
+
+static void do_setup_internal(void) {
+    if (!s_ws) return;
+    
+    
+    ESP_LOGW("kiwi", "setup: AR OK + agc + compression + tune");
+    k85_log("kiwisdr: setup start");
     vTaskDelay(pdMS_TO_TICKS(200));
     const char *ar = "SET AR OK in=12000 out=44100";
-    esp_websocket_client_send_text(s_ws, ar, strlen(ar), pdMS_TO_TICKS(1000));
+    kiwi_send(ar);
     vTaskDelay(pdMS_TO_TICKS(200));
+    kiwi_send("SET agc=1 hang=0 thresh=-100 slope=6 decay=1000 manGain=50");
+    vTaskDelay(pdMS_TO_TICKS(100));
     const char *comp = "SET compression=0";
-    int r2 = esp_websocket_client_send_text(s_ws, comp, strlen(comp), pdMS_TO_TICKS(1000));
+    int r2 = kiwi_send(comp);
+    ESP_LOGW("kiwi", "compression ret=%d", r2);
     k85_log("kiwisdr: sent compression ret=%d", r2);
     vTaskDelay(pdMS_TO_TICKS(200));
     send_retune();
@@ -286,6 +368,8 @@ static void do_handshake_internal(void) {
 // проигрывается готовое аудио (это не трогает websocket, но логично держать
 // рядом - тот же ритм, что и приём).
 static void kiwi_background_task(void *arg) {
+    for (int i = 0; i < K85_KIWI_NBUF; i++) s_buf_state[i] = 0;
+    s_fill_idx = 0; s_fill_pos = 0; s_qn = 0; s_play_idx = 0; s_primed = false;
     while (s_kiwi_task_running) {
         if (s_want_connect) {
             s_want_connect = false;
@@ -299,20 +383,49 @@ static void kiwi_background_task(void *arg) {
             s_need_handshake = false;
             do_handshake_internal();
         }
+        if (s_connected && s_ws && !s_setup_done && !s_need_handshake &&
+            (s_need_setup || (s_conn_us && (esp_timer_get_time() - s_conn_us) > 6000000))) {
+            s_need_setup = false;
+            s_setup_done = true;
+            do_setup_internal();
+        }
         if (s_want_retune) {
             s_want_retune = false;
             send_retune();
         }
 
-        for (int i = 0; i < 2; i++) {
-            if (s_buf_ready[i]) {
-                apply_gain(s_audio_buf[i], K85_KIWI_AUDIO_BUF_SAMPLES, K85_KIWI_SOFT_GAIN);
-                compute_spectrum(s_audio_buf[i], K85_KIWI_AUDIO_BUF_SAMPLES);
-                M5.Speaker.playRaw(s_audio_buf[i], K85_KIWI_AUDIO_BUF_SAMPLES, 12000, false, 1);
-                s_buf_ready[i] = false;
+        {
+            int pl = (int)M5.Speaker.isPlaying(1);
+            while (s_qn > pl) { s_buf_state[s_q[0]] = 0; s_q[0] = s_q[1]; s_qn--; }
+            int ready = 0;
+            for (int j = 0; j < K85_KIWI_NBUF; j++) if (s_buf_state[j] == 1) ready++;
+            if (!s_primed && ready >= 3) s_primed = true;
+            if (s_primed && pl == 0 && ready == 0) { s_primed = false; ESP_LOGW("kiwi", "underrun, rebuffering"); }
+            while (s_primed && pl < 2 && s_buf_state[s_play_idx] == 1) {
+                int16_t *b = s_audio_buf[s_play_idx];
+                apply_gain(b, K85_KIWI_AUDIO_BUF_SAMPLES, K85_KIWI_SOFT_GAIN);
+                compute_spectrum(b, K85_KIWI_AUDIO_BUF_SAMPLES);
+                M5.Speaker.playRaw(b, K85_KIWI_AUDIO_BUF_SAMPLES, 12000, false, 1);
+                s_buf_state[s_play_idx] = 2;
+                s_q[s_qn++] = s_play_idx;
+                s_play_idx = (s_play_idx + 1) % K85_KIWI_NBUF;
+                pl++;
             }
         }
 
+        {
+            static int64_t s_last_ka = 0;
+            int64_t k85_now = esp_timer_get_time();
+            if (s_connected && s_ws && !s_need_handshake && !esp_websocket_client_is_connected(s_ws)) {
+                s_connected = false;
+                s_connect_failed = true;
+                ESP_LOGW("kiwi", "connection lost (client not connected)");
+            }
+            if (s_connected && s_ws && !s_need_handshake && (k85_now - s_last_ka) > 5000000) {
+                s_last_ka = k85_now;
+                { int k85_kr = kiwi_send("SET keepalive"); ESP_LOGW("kiwi", "keepalive ret=%d", k85_kr); }
+            }
+        }
         vTaskDelay(pdMS_TO_TICKS(15));
     }
     s_kiwi_task_finished = true;
@@ -328,10 +441,12 @@ static bool start_kiwi_background_task(void) {
             return false;
         }
     }
+    if (s_kiwi_task_handle) vTaskDelay(pdMS_TO_TICKS(100));
     s_kiwi_task_running = true;
     s_kiwi_task_handle = xTaskCreateStaticPinnedToCore(
         kiwi_background_task, "k85_kiwi_ws", K85_KIWI_TASK_STACK_BYTES, nullptr, 5,
         s_kiwi_task_stack, &s_kiwi_task_buf, tskNO_AFFINITY);
+    if (!s_kiwi_task_handle) { s_kiwi_task_running = false; s_kiwi_task_finished = true; }
     return s_kiwi_task_handle != nullptr;
 }
 
@@ -409,7 +524,7 @@ static void draw_ui(void) {
 
     M5.Display.setTextColor(s_connected ? 0x00FF00 : 0xFF6600, bg);
     M5.Display.setCursor(4, H - 20);
-    M5.Display.print(s_connected ? "Connected" : "Connecting...");
+    M5.Display.print(s_connected ? "Connected" : (s_connect_failed ? "Connection lost" : "Connecting..."));
 
     M5.Display.setTextColor(0xAAAAAA, bg);
     M5.Display.setCursor(4, H - 10);
@@ -579,7 +694,7 @@ static bool pick_manual_host(void) {
     snprintf(port_buf, sizeof(port_buf), "%d", s_port);
     if (!k85_text_input("Port:", port_buf, port_buf, sizeof(port_buf))) return false;
     s_port = atoi(port_buf);
-    if (s_port <= 0) s_port = 8073;
+    if (s_port <= 0 || s_port > 65535) s_port = 8073;
     return true;
 }
 
