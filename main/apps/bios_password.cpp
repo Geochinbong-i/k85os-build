@@ -47,7 +47,7 @@ static bool has_password(char *stored, size_t n) {
 // Спрашивает пароль и сверяет с сохранённым. false = отмена или неверный пароль.
 static bool ask_and_verify(const char *prompt, const char *stored) {
     char pw[66];
-    if (!k85_text_input(prompt, "", pw, sizeof(pw), K85TextOptions{true,0,true})) { wipe(pw, sizeof(pw), K85TextOptions{true,0,true}); return false; }
+    if (!k85_text_input(prompt, "", pw, sizeof(pw), K85TextOptions{true,0,true})) { wipe(pw, sizeof(pw)); return false; }
     bool ok = k85_lock_verify_password(pw, stored);
     wipe(pw, sizeof(pw));
     return ok;
@@ -59,7 +59,7 @@ bool k85_bios_password_gate(void) {
 
     while (true) {
         char pw[66];
-        if (!k85_text_input("BIOS password", "", pw, sizeof(pw), K85TextOptions{true,0,true})) { wipe(pw, sizeof(pw), K85TextOptions{true,0,true}); return false; }
+        if (!k85_text_input("BIOS password", "", pw, sizeof(pw), K85TextOptions{true,0,true})) { wipe(pw, sizeof(pw)); return false; }
         bool ok = k85_lock_verify_password(pw, stored);
         wipe(pw, sizeof(pw));
         if (ok) { s_fail_count = 0; return true; }
@@ -81,13 +81,13 @@ static void set_password(bool has, const char *stored) {
         return;
     }
     char a[66], b[66];
-    if (!k85_text_input("New password (4+)", "", a, sizeof(a), K85TextOptions{true,0,true})) { wipe(a, sizeof(a), K85TextOptions{true,0,true}); return; }
+    if (!k85_text_input("New password (4+)", "", a, sizeof(a), K85TextOptions{true,0,true})) { wipe(a, sizeof(a)); return; }
     if (strlen(a) < K85_BIOS_PW_MIN) {
         wipe(a, sizeof(a));
         show_and_wait("Too short (min 4)\nA+B=back");
         return;
     }
-    if (!k85_text_input("Repeat password", "", b, sizeof(b), K85TextOptions{true,0,true})) { wipe(a, sizeof(a), K85TextOptions{true,0,true}); wipe(b, sizeof(b), K85TextOptions{true,0,true}); return; }
+    if (!k85_text_input("Repeat password", "", b, sizeof(b), K85TextOptions{true,0,true})) { wipe(a, sizeof(a)); wipe(b, sizeof(b)); return; }
     bool same = (strcmp(a, b) == 0);
     wipe(b, sizeof(b));
     if (!same) {
