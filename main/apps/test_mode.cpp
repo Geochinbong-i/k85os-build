@@ -1,5 +1,5 @@
 #include "core/control_motion.h"
-﻿#include "test_mode.h"
+#include "test_mode.h"
 #include "common.h"
 #include "input.h"
 #include "list_menu.h"
