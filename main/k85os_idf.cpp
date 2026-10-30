@@ -1,0 +1,243 @@
+#include "core/control_motion.h"
+// k85OS v4.1 — порт на ESP-IDF C++
+// Слой 4: core/rtc_ntp + steps/step_counter + core/device + system/system_info + system/logs_screen
+
+#include "M5Unified.h"
+#include "core/script_engine.h"
+#include "core/config.h"
+#include "core/setup_wizard.h"
+#include "core/cpu_freq.h"
+#include "core/theme.h"
+#include "core/input.h"
+#include "core/power.h"
+#include "core/battery.h"
+#include "core/sound.h"
+#include "core/log.h"
+#include "core/rtc_ntp.h"
+#include "core/device.h"
+#include "core/boot_screen.h"
+#include "steps/step_counter.h"
+#include "ui/menu.h"
+#include "ui/lock_screen.h"
+#include "ui/quick_settings.h"
+#include "net/ota.h"
+#include "core/post_beep.h"
+#include "net/wifi.h"
+#include "net/ssh_server.h"
+#include "net/k85_mqtt.h"
+#include "core/heavy_lock.h"
+#include "core/status_bar.h"
+#include "esp_ota_ops.h"
+using namespace k85;
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_timer.h"
+#include "core/fonts.h"
+
+#define K85_QS_HOLD_MS 800
+static bool s_b_was_down = false;
+static bool s_b_press_armed = false; // нажатие начато в app_main и ещё не развязано
+static bool s_b_long_fired = false;
+static int64_t s_b_down_start_us = 0;
+
+// Удержание A = непрерывная прокрутка назад (одиночный тап - как раньше, вперёд на 1).
+static bool s_a_was_down = false;
+static int64_t s_a_down_start_us = 0;
+static bool s_a_hold_active = false;
+static int64_t s_a_last_repeat_us = 0;
+#define K85_MENU_A_HOLD_MS 400
+#define K85_MENU_A_REPEAT_MS 220
+
+// Пересинхронизация B после блокирующих UI-циклов (шторка, menu_activate, lock_screen).
+// Иначе отпускание B, начатого внутри вложенного меню, читается как новое нажатие:
+// Back в тулсах -> повторное открытие тулсов.
+static void k85_btn_resync(void) {
+    k85_input_update();
+    s_b_was_down = k85_btn_b_is_down();
+    s_b_press_armed = false;
+    s_b_long_fired = false;
+    s_b_down_start_us = 0;
+    s_a_was_down = k85_btn_a_is_down();
+    s_a_hold_active = false;
+}
+
+extern "C" void app_main(void) {
+    auto m5cfg = M5.config();
+    M5.begin(m5cfg);
+
+    k85_log_init();
+    k85_log("Boot start");
+    k85_check_panic_screen();
+
+    if (!k85_fs_init()) {
+        M5.Display.fillScreen(0x000000);
+        M5.Display.setTextColor(0xFF0000, 0x000000);
+        M5.Display.setCursor(4, 4);
+        M5.Display.println("LittleFS FAIL");
+        k85_post_beep(PostCode::LITTLEFS_MOUNT_FAIL);
+        return;
+    }
+    k85_config_load();
+    k85_apply_font(g_config.font_idx);
+    k85_post_set_enabled(g_config.post_beep_enabled);
+    PostReport post_report;
+    k85_post_report_check(post_report, PostCode::LITTLEFS_MOUNT_FAIL, true);
+    k85_themes_load_custom();
+    k85_log("Config loaded");
+
+    if (!g_config.setup_completed) {
+        k85_run_setup_wizard();
+    }
+    k85_cpu_freq_apply_saved();
+
+    k85_heavy_lock_init(); remove("/littlefs/k85_ssh_host_key.der");  // K85SEC: SSH is gone, delete the stale host key // резервируем стек под SSH-таск заранее, littlefs уже готов
+    k85_rtc_ntp_init();
+    k85_post_report_check(post_report, PostCode::RTC_TIME_FAIL, k85_rtc_is_present());
+
+    if (!g_config.wifi_disabled) {
+        k85_wifi_init(); // сам факт успешного вызова = пройдено (детального статуса модуль не возвращает)
+    }
+    k85_post_report_check(post_report, PostCode::WIFI_INIT, true);
+
+    // Services: автозапуск при загрузке того, что пользователь включил.
+    if (g_config.mqtt_autostart && g_config.mqtt_broker_uri[0]) {
+        k85_mqtt_connect(g_config.mqtt_broker_uri, g_config.mqtt_client_id,
+                          g_config.mqtt_username, g_config.mqtt_password);
+    }
+
+    // TODO: подставить сюда реальный вызов инициализации BT, когда появится отдельная функция
+    k85_post_report_check(post_report, PostCode::BT_INIT, true);
+
+    k85_display_rotation(g_config.rotation);
+
+    k85_power_init();
+    M5.Display.setBrightness(g_config.brightness_active);
+    k85_apply_sound_volume();
+
+    int batt = k85_get_battery();
+    bool battery_ok = (batt < 0) || (batt > 20);
+    k85_post_report_check(post_report, PostCode::BATTERY_LOW, battery_ok);
+    k85_post_finish(post_report);
+
+    esp_ota_mark_app_valid_cancel_rollback(); // подтверждаем, что текущая (в т.ч. только что установленная OTA) прошивка рабочая — иначе следующая перезагрузка без этой отметки откатит бутлоадер на прошлый слот
+
+    k85_show_boot_screen();
+
+    if (g_config.ota_bg_check_enabled) {
+        k85_ota_start_background_check(6 * 60 * 60 * 1000); // проверка раз в 6 часов
+    }
+
+    k85_menu_init();
+    k85_menu_draw();
+    k85_lock_screen_loop();
+    k85_menu_draw();
+
+    int64_t last_sb_refresh_us = 0;
+
+    // startup.sh, cron, FTP autostart (background task)
+    k85_automation_boot();
+
+    while (true) {
+        k85_input_update();
+        k85_step_counter_update();
+
+        int64_t now_sb_us = esp_timer_get_time();
+        if (!g_config.desktop_mode && now_sb_us - last_sb_refresh_us > 1000000) { // раз в секунду
+            k85_status_bar_draw();
+            last_sb_refresh_us = now_sb_us;
+        }
+
+        if (k85_power_tick()) {
+            k85_lock_screen_loop();
+            k85_menu_draw();
+            k85_btn_resync();
+            continue;
+        }
+
+        if (g_config.navigation_profile>=0) {
+            if (g_config.desktop_mode) k85_menu_desktop_tick();
+            else {
+                auto ev=k85_nav_take();
+                if (ev==K85Nav::Next) k85_menu_next();
+                if (ev==K85Nav::Previous) k85_menu_prev();
+                if (ev==K85Nav::Select) { k85_menu_activate(); k85_nav_reset(); }
+                if (ev==K85Nav::Back || ev==K85Nav::EmergencyBack) { k85_menu_draw(); k85_nav_reset(); }
+            }
+            vTaskDelay(pdMS_TO_TICKS(20)); continue;
+        }
+        if (g_config.desktop_mode) {
+            k85_menu_desktop_tick();
+            vTaskDelay(pdMS_TO_TICKS(30));
+            continue;
+        }
+
+        bool a_down_now = k85_btn_a_is_down();
+        if (a_down_now && !s_a_was_down) {
+            s_a_down_start_us = esp_timer_get_time();
+            s_a_hold_active = false;
+        }
+        if (a_down_now) {
+            int64_t a_held_ms = (esp_timer_get_time() - s_a_down_start_us) / 1000;
+            if (a_held_ms >= K85_MENU_A_HOLD_MS) {
+                int64_t now_a = esp_timer_get_time();
+                if (!s_a_hold_active || (now_a - s_a_last_repeat_us) >= K85_MENU_A_REPEAT_MS * 1000) {
+                    s_a_hold_active = true;
+                    s_a_last_repeat_us = now_a;
+                    k85_wake_screen();
+                    k85_menu_prev();
+                }
+            }
+        }
+        if (!a_down_now && s_a_was_down && !s_a_hold_active) {
+            k85_wake_screen();
+            k85_menu_next();
+        }
+        s_a_was_down = a_down_now;
+
+        bool b_down_now = k85_btn_b_is_down();
+
+        if (b_down_now && !s_b_was_down) {
+            s_b_press_armed = true;
+            s_b_down_start_us = esp_timer_get_time();
+            s_b_long_fired = false;
+        }
+
+        if (b_down_now && s_b_press_armed && !s_b_long_fired) {
+            int64_t held_ms = (esp_timer_get_time() - s_b_down_start_us) / 1000;
+            if (held_ms >= K85_QS_HOLD_MS) {
+                s_b_long_fired = true;
+                k85_wake_screen();
+                k85_quick_settings_open();
+                k85_menu_draw();
+                k85_btn_resync();
+                continue;
+            }
+        }
+
+        if (!b_down_now && s_b_was_down && s_b_press_armed && !s_b_long_fired) {
+            k85_wake_screen();
+            k85_log("app_main SHORT B -> menu_activate()");
+            k85_menu_activate();
+            k85_btn_resync(); // после меню (тулсы и т.п.) B может быть ещё нажат
+            continue;
+        }
+
+        s_b_was_down = b_down_now;
+
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,226 @@
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+
+#include "shell_commands.h"
+#include "config.h"
+#include "device.h"
+#include "battery.h"
+#include "fs_guard.h"
+#include "script_engine.h"
+#include "shell_ext.h"
+
+#include "esp_chip_info.h"
+#include "esp_flash.h"
+#include "esp_psram.h"
+#include "esp_system.h"
+#include "esp_timer.h"
+
+#include "M5Unified.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include <dirent.h>
+#include <sys/stat.h>
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
+#include <string>
+
+static void cmd_info(char *out, size_t out_size) {
+    esp_chip_info_t chip;
+    esp_chip_info(&chip);
+    uint32_t flash_sz = 0;
+    esp_flash_get_size(nullptr, &flash_sz);
+    size_t psram_sz = esp_psram_is_initialized() ? esp_psram_get_size() : 0;
+
+    snprintf(out, out_size,
+        "Chip: %s rev v%d.%d, %d cores\r\n"
+        "Flash: %lu MB, PSRAM: %lu MB\r\n"
+        "Device name: %s\r\n",
+        CONFIG_IDF_TARGET, chip.revision / 100, chip.revision % 100, chip.cores,
+        (unsigned long)(flash_sz / (1024 * 1024)), (unsigned long)(psram_sz / (1024 * 1024)),
+        k85_get_device_name());
+}
+
+static void cmd_battery(char *out, size_t out_size) {
+    int pct = k85_get_battery();
+    snprintf(out, out_size, "Battery: %s%s\r\n",
+             pct >= 0 ? (std::to_string(pct) + "%").c_str() : "unknown",
+             k85_is_charging() ? " (charging)" : "");
+}
+
+static void cmd_imu(char *out, size_t out_size) {
+    float ax, ay, az, gx, gy, gz;
+    M5.Imu.update();
+    auto data = M5.Imu.getImuData();
+    ax = data.accel.x; ay = data.accel.y; az = data.accel.z;
+    gx = data.gyro.x; gy = data.gyro.y; gz = data.gyro.z;
+    snprintf(out, out_size,
+        "Accel: %.2f %.2f %.2f\r\nGyro: %.2f %.2f %.2f\r\n",
+        ax, ay, az, gx, gy, gz);
+}
+
+// Чёрный список: SSH host-ключ, файл конфига (с WiFi-паролями/хешами) и
+// k85_svc.cfg (хеш FTP-пароля) никогда не должны отдаваться через
+// shell-команды - иначе любой, кто получил доступ к терминалу/SSH, может
+// скачать их. Список общий с FTP-сервером и лежит в core/fs_guard.h.
+static bool is_blocked_path(const char *path) {
+    return k85_is_blocked_path(path);
+}
+
+static void cmd_ls(const char *arg, char *out, size_t out_size) {
+    char path[192];
+    snprintf(path, sizeof(path), "/littlefs%s%s", (arg[0] && arg[0] != '/') ? "/" : "", arg);
+    DIR *d = opendir(path[9] ? path : "/littlefs");
+    if (!d) { snprintf(out, out_size, "ls: cannot open %s\r\n", path); return; }
+
+    size_t used = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != nullptr && used < out_size - 64) {
+        char full[256];
+        snprintf(full, sizeof(full), "%s/%s", path, ent->d_name);
+        struct stat st;
+        bool is_dir = (stat(full, &st) == 0 && S_ISDIR(st.st_mode));
+        int w = snprintf(out + used, out_size - used, "%s%s\r\n", ent->d_name, is_dir ? "/" : "");
+        if (w > 0) used += w;
+    }
+    closedir(d);
+    if (used == 0) snprintf(out, out_size, "(empty)\r\n");
+}
+
+static void cmd_cat(const char *arg, char *out, size_t out_size) {
+    if (is_blocked_path(arg)) {
+        snprintf(out, out_size, "cat: access denied\r\n");
+        return;
+    }
+    char path[192];
+    snprintf(path, sizeof(path), "/littlefs/%s", arg);
+    FILE *f = fopen(path, "r");
+    if (!f) { snprintf(out, out_size, "cat: cannot open %s\r\n", arg); return; }
+    size_t r = fread(out, 1, out_size - 3, f);
+    fclose(f);
+    out[r] = 0;
+    strcat(out, "\r\n");
+}
+
+#define K85_SHELL_PS_MAX_TASKS 24
+
+static const char *ps_state_letter(eTaskState st) {
+    switch (st) {
+        case eRunning:   return "R";
+        case eReady:     return "Y";
+        case eBlocked:   return "B";
+        case eSuspended: return "S";
+        case eDeleted:   return "D";
+        default:         return "?";
+    }
+}
+
+static void cmd_ps(char *out, size_t out_size) {
+    static TaskStatus_t tasks[K85_SHELL_PS_MAX_TASKS];
+    UBaseType_t count = uxTaskGetNumberOfTasks();
+    if (count > K85_SHELL_PS_MAX_TASKS) count = K85_SHELL_PS_MAX_TASKS;
+    uint32_t total_runtime;
+    count = uxTaskGetSystemState(tasks, count, &total_runtime);
+
+    size_t used = 0;
+    int w = snprintf(out + used, out_size - used, "NAME            ST PRI STACK\r\n");
+    if (w > 0) used += (size_t)w;
+    for (UBaseType_t i = 0; i < count && used + 40 < out_size; i++) {
+        TaskStatus_t *t = &tasks[i];
+        int ww = snprintf(out + used, out_size - used, "%-15.15s %s %3u %5uB\r\n",
+                           t->pcTaskName, ps_state_letter(t->eCurrentState),
+                           (unsigned)t->uxCurrentPriority, (unsigned)t->usStackHighWaterMark);
+        if (ww > 0) used += (size_t)ww;
+    }
+}
+
+static void shell_run_simple(const char *cmd_full, char *out, size_t out_size) {
+    char cmd[32] = {0};
+    const char *arg = "";
+    const char *sp = strchr(cmd_full, ' ');
+    if (sp) {
+        size_t clen = sp - cmd_full;
+        if (clen >= sizeof(cmd)) clen = sizeof(cmd) - 1;
+        memcpy(cmd, cmd_full, clen);
+        arg = sp + 1;
+    } else {
+        snprintf(cmd, sizeof(cmd), "%s", cmd_full);
+    }
+
+    if (!strcmp(cmd, "help")) {
+        snprintf(out, out_size,
+            "Commands:\r\n"
+            "  info, free, uptime, battery, wifi, imu, ps\r\n"
+            "  ls [dir], cat <file>\r\n"
+            "  wifi-on, wifi-off, brightness <0-100>, volume <0-100>\r\n"
+            "  echo, set, alias, unalias, sleep <s>, sh <file>\r\n"
+            "  cron [on|off|reload|list], ftp [start|stop], ftppass <user> <pass>\r\n"
+            "  grep, head, tail, wc, cp, mv, rm, mkdir, touch, date, df, du\r\n"
+            "  hostname, ifconfig, nslookup, wget, curl, watch, neofetch, at, tar, scrshot\r\n"
+            "  pipes | and redirects > >> are supported\r\n"
+            "  reboot, exit\r\n");
+    } else if (!strcmp(cmd, "ps") || !strcmp(cmd, "htop")) {
+        cmd_ps(out, out_size);
+    } else if (!strcmp(cmd, "info")) {
+        cmd_info(out, out_size);
+    } else if (!strcmp(cmd, "free")) {
+        snprintf(out, out_size, "Free heap: %lu KB\r\n", (unsigned long)(esp_get_free_heap_size() / 1024));
+    } else if (!strcmp(cmd, "uptime")) {
+        int64_t us = esp_timer_get_time();
+        snprintf(out, out_size, "Uptime: %lld sec\r\n", (long long)(us / 1000000));
+    } else if (!strcmp(cmd, "battery")) {
+        cmd_battery(out, out_size);
+    } else if (!strcmp(cmd, "wifi")) {
+        snprintf(out, out_size, "WiFi SSID: %s\r\n", g_config.wifi_ssid[0] ? g_config.wifi_ssid : "(none)");
+    } else if (!strcmp(cmd, "imu")) {
+        cmd_imu(out, out_size);
+    } else if (!strcmp(cmd, "ls")) {
+        cmd_ls(arg, out, out_size);
+    } else if (!strcmp(cmd, "cat")) {
+        cmd_cat(arg, out, out_size);
+    } else if (!strcmp(cmd, "wifi-on")) {
+        g_config.wifi_disabled = false;
+        k85_config_save();
+        snprintf(out, out_size, "WiFi enabled\r\n");
+    } else if (!strcmp(cmd, "wifi-off")) {
+        g_config.wifi_disabled = true;
+        k85_config_save();
+        snprintf(out, out_size, "WiFi disabled\r\n");
+    } else if (!strcmp(cmd, "brightness")) {
+        int v = atoi(arg);
+        if (v < 0) v = 0;
+        if (v > 100) v = 100;
+        g_config.brightness_active = v;
+        M5.Display.setBrightness(v);
+        k85_config_save();
+        snprintf(out, out_size, "Brightness set to %d%%\r\n", v);
+    } else if (!strcmp(cmd, "volume")) {
+        int v = atoi(arg);
+        if (v < 0) v = 0;
+        if (v > 100) v = 100;
+        g_config.sound_volume = v;
+        k85_config_save();
+        snprintf(out, out_size, "Volume set to %d%%\r\n", v);
+    } else if (!strcmp(cmd, "panic-test")) {
+        // Тестовая команда: намеренно роняет прошивку через abort() ->
+        // ESP-IDF сохраняет причину как ESP_RST_PANIC, при следующей
+        // загрузке сработает k85_check_panic_screen(). Безопасно - не
+        // трогает флеш/LittleFS, просто немедленный краш+перезагрузка.
+        abort();
+    } else if (!strcmp(cmd, "reboot")) {
+        snprintf(out, out_size, "Rebooting...\r\n");
+    } else if (strlen(cmd) == 0) {
+        out[0] = 0;
+    } else if (k85_ext_run_command(cmd, arg, out, out_size)) {
+        // обработано в script_engine: echo/set/alias/unalias/sleep/sh/cron/ftp/ftppass и пользовательские alias
+    } else {
+        snprintf(out, out_size, "Unknown command: %s (try 'help')\r\n", cmd);
+    }
+}
+
+void k85_shell_run_command(const char *cmd_full, char *out, size_t out_size) {
+    k85_shell_pipeline(cmd_full, out, out_size, shell_run_simple);
+}
+
+#pragma GCC diagnostic pop

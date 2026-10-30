@@ -1,0 +1,270 @@
+#include "app_repo.h"
+
+#include "esp_https_ota.h"
+#include "esp_http_client.h"
+#include "esp_crt_bundle.h"
+#include "esp_log.h"
+#include "cJSON.h"
+#include "esp_heap_caps.h"
+#include "core/heavy_lock.h"
+
+#include <cstdio>
+#include <cstring>
+
+static const char *TAG = "k85_apprepo";
+
+#define K85_APPREPO_OWNER "kion85"
+#define K85_APPREPO_REPO  "apps_k85os"
+
+struct HttpBuf {
+    char *data;
+    size_t len;
+    size_t cap;
+};
+
+static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
+    HttpBuf *buf = (HttpBuf *)evt->user_data;
+    if (evt->event_id == HTTP_EVENT_ON_DATA && buf) {
+        if (buf->len + evt->data_len < buf->cap) {
+            memcpy(buf->data + buf->len, evt->data, evt->data_len);
+            buf->len += evt->data_len;
+            buf->data[buf->len] = 0;
+        } else {
+            ESP_LOGW(TAG, "http response truncated, buffer too small (cap=%u)", (unsigned)buf->cap);
+        }
+    }
+    return ESP_OK;
+}
+
+bool k85_apprepo_fetch_uefi_theme_list(char out_names[][64], char out_urls[][256], int max, int *out_count) {
+    *out_count = 0;
+
+    K85HeavyLockGuard heavy_lock(15000);
+    if (!heavy_lock.held) {
+        ESP_LOGW(TAG, "uefi fetch: heavy lock busy, skipping");
+        return false;
+    }
+
+    char url[160];
+    snprintf(url, sizeof(url), "https://api.github.com/repos/%s/%s/releases/tags/uefi",
+             K85_APPREPO_OWNER, K85_APPREPO_REPO);
+
+    // 4096 байт было мало для ответа GitHub API с 13+ ассетами (JSON легко
+    // превышает 6-10KB) — http_event_handler молча отбрасывал "хвост",
+    // cJSON_Parse получал битый JSON и возвращал false ("No themes found",
+    // хотя релиз реально существовал и был заполнен). Увеличиваем буфер и
+    // держим его в PSRAM, а не в internal RAM (по 16KB на статический
+    // internal-буфер, которым пользуются раз в сто лет, не разбрасываемся).
+    #define K85_APPREPO_JSON_BUF_SIZE 32768
+    static char *json_buf = nullptr;
+    if (!json_buf) {
+        json_buf = (char *)heap_caps_malloc(K85_APPREPO_JSON_BUF_SIZE, MALLOC_CAP_SPIRAM);
+        if (!json_buf) return false;
+    }
+    HttpBuf buf = { json_buf, 0, K85_APPREPO_JSON_BUF_SIZE };
+    json_buf[0] = 0;
+
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    cfg.event_handler = http_event_handler;
+    cfg.user_data = &buf;
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.buffer_size_tx = 2048;  // K85NET1: long GitHub redirect URLs
+    cfg.timeout_ms = 20000;
+    cfg.user_agent = "k85OS-device";
+
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) return false;
+
+    esp_err_t err = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+
+    ESP_LOGW(TAG, "uefi fetch: err=%d status=%d buf_len=%u", err, status, (unsigned)buf.len);
+    if (err != ESP_OK || status != 200) {
+        ESP_LOGW(TAG, "uefi release fetch failed: err=%d status=%d", err, status);
+        return false;
+    }
+
+    cJSON *root = cJSON_Parse(json_buf);
+    if (!root) {
+        ESP_LOGW(TAG, "uefi: cJSON_Parse failed, first 100 chars: %.100s", json_buf);
+        return false;
+    }
+
+    cJSON *assets = cJSON_GetObjectItem(root, "assets");
+    if (!cJSON_IsArray(assets)) {
+        ESP_LOGW(TAG, "uefi: no 'assets' array in response");
+        cJSON_Delete(root);
+        return false;
+    }
+    ESP_LOGW(TAG, "uefi: assets array size=%d", cJSON_GetArraySize(assets));
+
+    int n = cJSON_GetArraySize(assets);
+    int found = 0;
+    for (int i = 0; i < n && found < max; i++) {
+        cJSON *asset = cJSON_GetArrayItem(assets, i);
+        cJSON *name = cJSON_GetObjectItem(asset, "name");
+        cJSON *dl_url = cJSON_GetObjectItem(asset, "browser_download_url");
+        if (!cJSON_IsString(name) || !cJSON_IsString(dl_url)) continue;
+
+        size_t nlen = strlen(name->valuestring);
+        if (nlen <= 4 || strcasecmp(name->valuestring + nlen - 4, ".thm") != 0) continue;
+
+        snprintf(out_names[found], 64, "%.63s", name->valuestring);
+        snprintf(out_urls[found], 256, "%.255s", dl_url->valuestring);
+        found++;
+    }
+
+    cJSON_Delete(root);
+    *out_count = found;
+    return found > 0;
+}
+
+bool k85_apprepo_fetch_app_list(char out_names[][64], char out_urls[][256], char out_sig_urls[][256], int max, int *out_count) {
+    *out_count = 0;
+
+    K85HeavyLockGuard heavy_lock(15000);
+    if (!heavy_lock.held) {
+        ESP_LOGW(TAG, "app fetch: heavy lock busy, skipping");
+        return false;
+    }
+
+    char url[160];
+    snprintf(url, sizeof(url), "https://api.github.com/repos/%s/%s/releases/tags/app",
+             K85_APPREPO_OWNER, K85_APPREPO_REPO);
+
+    #define K85_APPREPO_APP_JSON_BUF_SIZE 32768
+    static char *app_json_buf = nullptr;
+    if (!app_json_buf) {
+        app_json_buf = (char *)heap_caps_malloc(K85_APPREPO_APP_JSON_BUF_SIZE, MALLOC_CAP_SPIRAM);
+        if (!app_json_buf) return false;
+    }
+    HttpBuf buf = { app_json_buf, 0, K85_APPREPO_APP_JSON_BUF_SIZE };
+    app_json_buf[0] = 0;
+
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    cfg.event_handler = http_event_handler;
+    cfg.user_data = &buf;
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.buffer_size_tx = 2048;  // K85NET1: long GitHub redirect URLs
+    cfg.timeout_ms = 20000;
+    cfg.user_agent = "k85OS-device";
+
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) return false;
+
+    esp_err_t err = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+
+    if (err != ESP_OK || status != 200) {
+        ESP_LOGW(TAG, "app release fetch failed: err=%d status=%d", err, status);
+        return false;
+    }
+
+    cJSON *root = cJSON_Parse(app_json_buf);
+    if (!root) {
+        ESP_LOGW(TAG, "app: cJSON_Parse failed, first 100 chars: %.100s", app_json_buf);
+        return false;
+    }
+
+    cJSON *assets = cJSON_GetObjectItem(root, "assets");
+    if (!cJSON_IsArray(assets)) {
+        ESP_LOGW(TAG, "app: no 'assets' array in response");
+        cJSON_Delete(root);
+        return false;
+    }
+
+    int n = cJSON_GetArraySize(assets);
+    int found = 0;
+    for (int i = 0; i < n && found < max; i++) {
+        cJSON *asset = cJSON_GetArrayItem(assets, i);
+        cJSON *name = cJSON_GetObjectItem(asset, "name");
+        cJSON *dl_url = cJSON_GetObjectItem(asset, "browser_download_url");
+        if (!cJSON_IsString(name) || !cJSON_IsString(dl_url)) continue;
+        size_t k85_nl = strlen(name->valuestring);   // K85-05: signature files are metadata, not packages
+        if (k85_nl > 4 && strcmp(name->valuestring + k85_nl - 4, ".sig") == 0) continue;
+        snprintf(out_names[found], 64, "%s", name->valuestring);
+        snprintf(out_urls[found], 256, "%s", dl_url->valuestring);
+
+        out_sig_urls[found][0] = 0;
+        char sig_name[70];
+        snprintf(sig_name, sizeof(sig_name), "%s.sig", name->valuestring);
+        for (int j = 0; j < n; j++) {
+            cJSON *sig_asset = cJSON_GetArrayItem(assets, j);
+            cJSON *sig_name_j = cJSON_GetObjectItem(sig_asset, "name");
+            cJSON *sig_url_j = cJSON_GetObjectItem(sig_asset, "browser_download_url");
+            if (cJSON_IsString(sig_name_j) && cJSON_IsString(sig_url_j) &&
+                strcmp(sig_name_j->valuestring, sig_name) == 0) {
+                snprintf(out_sig_urls[found], 256, "%s", sig_url_j->valuestring);
+                break;
+            }
+        }
+        found++;
+    }
+    cJSON_Delete(root);
+    *out_count = found;
+    return found > 0;
+}
+
+// Лимит размера скачиваемого файла - без него сервер (или подмена DNS/MITM
+// без валидного сертификата - хотя crt_bundle это уже блокирует) может
+// отдавать бесконечный поток и забить LittleFS до отказа.
+#define K85_APPREPO_MAX_DOWNLOAD_BYTES (4 * 1024 * 1024) // 4MB - с запасом под самый крупный ожидаемый .bin
+
+bool k85_apprepo_download_file(const char *url, const char *dest_path) {   // K85AUD1: temp file + every write checked
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.buffer_size_tx = 2048;  // K85NET1: long GitHub redirect URLs
+    cfg.timeout_ms = 20000;
+    cfg.user_agent = "k85OS-device";
+
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) return false;
+
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        esp_http_client_cleanup(client);
+        return false;
+    }
+    esp_http_client_fetch_headers(client);
+
+    int status = esp_http_client_get_status_code(client);
+    if (status != 200) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    char tmp_path[272];
+    snprintf(tmp_path, sizeof(tmp_path), "%.255s.tmp", dest_path);
+    FILE *f = fopen(tmp_path, "wb");
+    if (!f) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    char buf[512];
+    int r;
+    bool ok = true;
+    long total = 0;
+    while ((r = esp_http_client_read(client, buf, sizeof(buf))) > 0) {
+        total += r;
+        if (total > K85_APPREPO_MAX_DOWNLOAD_BYTES) { ok = false; break; }
+        if (fwrite(buf, 1, (size_t)r, f) != (size_t)r) { ok = false; break; }
+    }
+    if (r < 0) ok = false;
+    if (ferror(f)) ok = false;
+    if (fclose(f) != 0) ok = false;
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
+    if (!ok) { remove(tmp_path); return false; }
+    remove(dest_path);
+    if (rename(tmp_path, dest_path) != 0) { remove(tmp_path); return false; }
+    return true;
+}
