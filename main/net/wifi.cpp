@@ -1,4 +1,5 @@
 #include "wifi.h"
+#include "core/text_edit.h"
 #include "config.h"
 #include "log.h"
 #include "notifications.h"
@@ -55,10 +56,7 @@ void k85_wifi_init(void) {
     if (s_inited) return;
 
     esp_err_t nvs_err = nvs_flash_init();
-    if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase();
-        nvs_err = nvs_flash_init();
-    }
+    if(nvs_err!=ESP_OK) { k85_log("WiFi NVS unavailable; retained for recovery"); return; }
 
     // netif и дефолтный event loop создаются один раз за всё время жизни
     // прошивки — пересоздавать их на каждый init/deinit цикл нельзя (это
@@ -94,7 +92,10 @@ void k85_wifi_init(void) {
 
 // общая функция подключения, используется и в connect_saved, и в connect
 static bool wifi_do_connect(const char *ssid, const char *password) {
+    if (!password) password="";
+    if (!k85edit::wifi_valid(ssid,password)) return false;
     if (!s_inited) k85_wifi_init();
+    if (!s_inited) return false;
     if (!s_wifi_event_group) s_wifi_event_group = xEventGroupCreate();
     xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
 
@@ -102,7 +103,7 @@ static bool wifi_do_connect(const char *ssid, const char *password) {
     // K85BUG2: null-safe copy, open networks allowed
     if (!ssid || !ssid[0]) return false;
     if (!password) password = "";
-    strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
+    memcpy(wifi_config.sta.ssid,ssid,strlen(ssid));
     strncpy((char *)wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
     wifi_config.sta.threshold.authmode = password[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
 

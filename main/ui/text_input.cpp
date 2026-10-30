@@ -1,480 +1,124 @@
 #include "text_input.h"
-#include "esp_attr.h"
+#include "core/text_edit.h"
 #include "theme.h"
-#include "battery.h"
-#include "power.h"
 #include "input.h"
 #include "config.h"
-#include "config.h"
-
+#include "core/control_motion.h"
 #include "M5Unified.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-
-#include <cstring>
-#include <cstdio>
-#include <cctype>
-#include <cmath>
 #include "esp_timer.h"
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
 
-static int64_t k85_ti_ticks_ms() { return esp_timer_get_time() / 1000; }
+// 튜닝: 편집 메모리 상한 2047바이트, 센서 반복 220ms, 기울기 진입 0.25/해제 0.15.
+// 센서 반복 간격을 줄이면 이동이 빨라진다. 버튼으로 모든 기능에 접근 가능하다.
+static constexpr size_t EDIT_CAPACITY=2048;
+static constexpr int IMU_REPEAT_MS=220;
+static constexpr float IMU_ENTER=0.25f, IMU_LEAVE=0.15f;
 
-static const char *KB_ROW0[] = {"1","2","3","4","5","6","7","8","9","0"};
-static const char *KB_ROW1_EN[] = {"Q","W","E","R","T","Y","U","I","O","P"};
-static const char *KB_ROW2_EN[] = {"A","S","D","F","G","H","J","K","L"};
-static const char *KB_ROW3_EN[] = {"Z","X","C","V","B","N","M","-","_","."};
-static const char *KB_ROW1_RU[] = {"?","?","?","?","?","?","?","?","?","?","?","?"};
-static const char *KB_ROW2_RU[] = {"?","?","?","?","?","?","?","?","?","?","?"};
-static const char *KB_ROW3_RU[] = {"?","?","?","?","?","?","?","?","?","?","."};
-static const char *KB_ROW4_EN[] = {"SPACE","DEL","EXIT","OK","RU","CAPS"};
-static const char *KB_ROW4_RU[] = {"SPACE","DEL","EXIT","OK","EN","CAPS"};
-
-// Отдельные раскладки нижнего ряда для многострочного редактора - добавлена
-// клавиша ENTER. Держим отдельно от однострочных KB_ROW4_*, чтобы не
-// затронуть k85_text_input() (там ENTER была бы бессмысленной/опасной клавишей).
-static const char *KB_ROW4_EN_ML[] = {"SPACE","ENTER","DEL","EXIT","OK","RU","CAPS"};
-static const char *KB_ROW4_RU_ML[] = {"SPACE","ENTER","DEL","EXIT","OK","EN","CAPS"};
-
-struct KbLayout {
-    const char *const *rows[5];
-    int counts[5];
-};
-
-static KbLayout kb_layout_en() {
-    return { { KB_ROW0, KB_ROW1_EN, KB_ROW2_EN, KB_ROW3_EN, KB_ROW4_EN },
-             { 10, 10, 9, 10, 6 } };
-}
-static KbLayout kb_layout_ru() {
-    return { { KB_ROW0, KB_ROW1_RU, KB_ROW2_RU, KB_ROW3_RU, KB_ROW4_RU },
-             { 10, 12, 11, 11, 6 } };
-}
-static KbLayout kb_layout_en_ml() {
-    return { { KB_ROW0, KB_ROW1_EN, KB_ROW2_EN, KB_ROW3_EN, KB_ROW4_EN_ML },
-             { 10, 10, 9, 10, 7 } };
-}
-static KbLayout kb_layout_ru_ml() {
-    return { { KB_ROW0, KB_ROW1_RU, KB_ROW2_RU, KB_ROW3_RU, KB_ROW4_RU_ML },
-             { 10, 12, 11, 11, 7 } };
-}
-
-bool k85_text_input(const char *prompt, const char *initial, char *out, size_t out_size) {
-    char text[128];
-    snprintf(text, sizeof(text), "%s", initial ? initial : "");
-
-    int st_row = 0, st_col = 0;
-    int64_t a_press_start = 0;
-    bool a_was_down = false;
-    bool a_hold_triggered = false;
-    const int hold_ms = 400;
-    int64_t last_imu_step_ms = 0;
-    const int64_t imu_step_cooldown_ms = 220;
-    const float imu_threshold = 0.35f;
-    bool is_ru = false;
-    bool is_caps = false;
-    int64_t last_activity_ms = k85_ti_ticks_ms();
-    bool kb_hidden = false;
-    #define K85_TI_KB_IDLE_MS 5000
-
-    int W = M5.Display.width();
-    int H = M5.Display.height();
-    uint32_t bg = k85_get_bg();
-    uint32_t fg = k85_get_fg();
-    uint32_t accent = k85_get_accent();
-
-    auto draw = [&]() {
-        KbLayout kb = is_ru ? kb_layout_ru() : kb_layout_en();
-        if (st_col >= kb.counts[st_row]) st_col = kb.counts[st_row] - 1;
-
-        M5.Display.fillScreen(bg);
-        M5.Display.setTextSize(1);
-        M5.Display.setTextColor(accent, bg);
-        M5.Display.setCursor(4, 2);
-        M5.Display.printf("%s [%s/%s]", prompt, is_ru ? "RU" : "EN", is_caps ? "CAPS" : "low");
-
-        M5.Display.setTextSize(2);
-        M5.Display.setTextColor(fg, bg);
-        M5.Display.setCursor(4, 16);
-        int len = (int)strlen(text);
-        if (len <= 16) {
-            M5.Display.printf("%s_", text);
-        } else {
-            M5.Display.printf("...%s_", text + (len - 13));
-        }
-
-        if (kb_hidden) {
-            M5.Display.setTextSize(1);
-            M5.Display.setTextColor(0x666666, bg);
-            const char *hint = "(press any button)";
-            int hx = (W - (int)strlen(hint) * 6) / 2;
-            M5.Display.setCursor(hx, H / 2);
-            M5.Display.print(hint);
-            k85_draw_battery_icon();
-            return;
-        }
-
-        int top = 38;
-        int row_h = (H - top - 2) / 5;
-        if (row_h < 12) row_h = 12;
-
-        for (int r = 0; r < 5; r++) {
-            int n = kb.counts[r];
-            int col_w = W / n;
-            for (int c = 0; c < n; c++) {
-                int x = c * col_w;
-                int y = top + r * row_h;
-                bool sel = (r == st_row && c == st_col);
-                uint32_t bgc = sel ? accent : 0x222222;
-                uint32_t fgc = sel ? 0x000000 : fg;
-                M5.Display.fillRect(x + 1, y + 1, col_w - 2, row_h - 2, bgc);
-                const char *label = kb.rows[r][c];
-                M5.Display.setTextSize(1);
-                M5.Display.setTextColor(fgc, bgc);
-                int lbl_len = (int)strlen(label);
-                int tx = x + (col_w - lbl_len * 6) / 2; if (tx < x) tx = x;
-                int ty = y + (row_h - 8) / 2; if (ty < y) ty = y;
-                M5.Display.setCursor(tx, ty);
-                M5.Display.print(label);
-            }
-        }
-        k85_draw_battery_icon();
-    };
-
-    draw();
+static bool edit(const char *prompt,const char *initial,char *out,size_t size,
+                 K85TextOptions opt,bool multiline) {
+    if (!out || !size) return false;
+    static char text[EDIT_CAPACITY];
+    size_t limit=std::min(size-1,EDIT_CAPACITY-1);
+    if (opt.max_bytes) limit=std::min(limit,opt.max_bytes);
+    if (!k85edit::initial(text,limit+1,initial)) return false;
+    int page=0,focus=0;
+    bool shown=!opt.secret, dirty=true, tilted=false;
+    int64_t last_step=0;
+    const char *error="";
+    k85_nav_reset();
+    // 원리: 현재 페이지 문자와 명시 제어 키를 한 목록으로 연결해 빈 칸을 건너뛴다.
     while (true) {
-        k85_input_update();
-        int64_t now = k85_ti_ticks_ms();
-        KbLayout kb = is_ru ? kb_layout_ru() : kb_layout_en();
-
-        float imu_ax = 0, imu_ay = 0, imu_az = 0;
-        if (g_config.kbd_nav_mode == 1) {
-            M5.Imu.getAccel(&imu_ax, &imu_ay, &imu_az); // TODO: сверь с air_mouse.cpp, если сигнатура другая
-        }
-        bool imu_tilted = (g_config.kbd_nav_mode == 1) &&
-                           (fabsf(imu_ax) > imu_threshold || fabsf(imu_ay) > imu_threshold);
-        bool any_input = k85_btn_a_is_down() || k85_btn_b_is_down() || imu_tilted;
-        if (any_input) {
-            if (kb_hidden) {
-                kb_hidden = false;
-                last_activity_ms = now;
-                draw();
-                vTaskDelay(pdMS_TO_TICKS(30));
-                continue; // это нажатие только "будит" клавиатуру, не вводит символ
+        const int chars=std::strlen(k85edit::pages[page]);
+        const char *controls[]={"abc","ABC","123","SYM1","SYM2","SP","DEL","OK","X",shown?"HIDE":"SHOW","RU","NL"};
+        const int control_count=multiline?12:11, count=chars+control_count;
+        if (dirty) {
+            const int w=M5.Display.width(), h=M5.Display.height();
+            const int cols=w<200?5:8, rows=(count+cols-1)/cols;
+            const int top=55, cell_w=w/cols, cell_h=(h-top-12)/rows;
+            M5.Display.fillScreen(k85_get_bg()); M5.Display.setTextSize(1);
+            M5.Display.setTextColor(k85_get_fg(),k85_get_bg());
+            M5.Display.setCursor(2,1); M5.Display.printf("%.*s [%s]",w/6-8,prompt?prompt:"Text",k85edit::names[page]);
+            M5.Display.setCursor(2,12); M5.Display.printf("%u/%u bytes %s",unsigned(std::strlen(text)),unsigned(limit),error);
+            char preview[40]; size_t len=std::strlen(text), n=std::min(len,size_t(w/6-1));
+            if (shown) { std::memcpy(preview,text+len-n,n); preview[n]=0; }
+            else { std::memset(preview,'*',n); preview[n]=0; }
+            // 줄바꿈은 미리보기에서만 공백으로 표시하며 실제 편집값은 보존한다.
+            for (size_t i=0;i<n;i++) if (preview[i]=='\n') preview[i]=' ';
+            M5.Display.setCursor(2,25); M5.Display.print(preview);
+            M5.Display.setCursor(2,39); M5.Display.print("OK:save X:cancel");
+            for (int i=0;i<count;i++) {
+                int x=(i%cols)*cell_w,y=top+(i/cols)*cell_h;
+                bool selected=i==focus;
+                uint32_t bg=selected?k85_get_accent():0x222222, fg=selected?0:k85_get_fg();
+                M5.Display.fillRect(x+1,y+1,cell_w-2,cell_h-2,bg);
+                M5.Display.setTextColor(fg,bg); M5.Display.setCursor(x+2,y+(cell_h-8)/2);
+                if (i<chars) M5.Display.printf("%c",k85edit::pages[page][i]);
+                else M5.Display.print(controls[i-chars]);
             }
-            last_activity_ms = now;
-        } else if (!kb_hidden && (now - last_activity_ms) >= K85_TI_KB_IDLE_MS) {
-            kb_hidden = true;
-            draw();
+            M5.Display.setTextColor(k85_get_fg(),k85_get_bg());
+            M5.Display.setCursor(1,h-10); M5.Display.printf("%.*s",w/6,k85_nav_hint());
+            dirty=false;
         }
-
-        if (g_config.kbd_nav_mode == 1) {
-            if (now - last_imu_step_ms >= imu_step_cooldown_ms) {
-                bool moved = false;
-                if (imu_ax > imu_threshold) {
-                    st_col = (st_col + 1) % kb.counts[st_row];
-                    moved = true;
-                } else if (imu_ax < -imu_threshold) {
-                    st_col = (st_col - 1 + kb.counts[st_row]) % kb.counts[st_row];
-                    moved = true;
-                } else if (imu_ay > imu_threshold) {
-                    st_row = (st_row + 1) % 5;
-                    if (st_col > kb.counts[st_row] - 1) st_col = kb.counts[st_row] - 1;
-                    moved = true;
-                } else if (imu_ay < -imu_threshold) {
-                    st_row = (st_row - 1 + 5) % 5;
-                    if (st_col > kb.counts[st_row] - 1) st_col = kb.counts[st_row] - 1;
-                    moved = true;
-                }
-                if (moved) {
-                    k85_wake_screen();
-                    last_imu_step_ms = now;
-                    draw();
+        k85_input_update(); K85Nav ev=k85_nav_take();
+        if (ev==K85Nav::Back || ev==K85Nav::EmergencyBack || k85_ab_held(500)) {
+            k85_wait_ab_release(); std::memset(text,0,sizeof(text)); return false;
+        }
+        if (g_config.kbd_nav_mode==1) {
+            K85Vec v; bool ok=k85_control_vector(v);
+            if (ok) {
+                int64_t now=esp_timer_get_time()/1000;
+                float magnitude=std::fmax(std::fabs(v.x),std::fabs(v.y));
+                if (magnitude<IMU_LEAVE) tilted=false;
+                if (magnitude>IMU_ENTER && (!tilted || now-last_step>=IMU_REPEAT_MS)) {
+                    int cols=M5.Display.width()<200?5:8;
+                    int delta=std::fabs(v.x)>std::fabs(v.y)?(v.x>0?1:-1):(v.y>0?cols:-cols);
+                    focus=(focus+delta+count)%count; last_step=now; tilted=true; dirty=true;
                 }
             }
-        } else {
-            bool a_down_now = k85_btn_a_is_down();
-            if (a_down_now && !a_was_down) {
-                a_press_start = now;
-                a_hold_triggered = false;
-            }
-            if (a_down_now && !a_hold_triggered && (now - a_press_start) >= hold_ms) {
-                st_row = (st_row + 1) % 5;
-                if (st_col > kb.counts[st_row] - 1) st_col = kb.counts[st_row] - 1;
-                a_hold_triggered = true;
-                draw();
-            }
-            if (!a_down_now && a_was_down && !a_hold_triggered) {
-                k85_wake_screen();
-                st_col = (st_col + 1) % kb.counts[st_row];
-                draw();
-            }
-            a_was_down = a_down_now;
         }
-        if (k85_btn_b_pressed()) {
-            k85_wake_screen();
-            const char *key = kb.rows[st_row][st_col];
-            if (!strcmp(key, "SPACE")) {
-                size_t l = strlen(text);
-                if (l + 1 < sizeof(text)) { text[l] = ' '; text[l + 1] = 0; }
-            } else if (!strcmp(key, "DEL")) {
-                size_t l = strlen(text);
-                if (l > 0) text[l - 1] = 0;
-            } else if (!strcmp(key, "EXIT")) {
-                return false;
-            } else if (!strcmp(key, "OK")) {
-                snprintf(out, out_size, "%s", text);
-                return true;
-            } else if (!strcmp(key, "EN") || !strcmp(key, "RU")) {
-                is_ru = !strcmp(key, "RU");
-                st_row = 0; st_col = 0;
-            } else if (!strcmp(key, "CAPS")) {
-                is_caps = !is_caps;
+        if (ev==K85Nav::Next || ev==K85Nav::Previous) {
+            focus=(focus+(ev==K85Nav::Next?1:count-1))%count; dirty=true;
+        }
+        if (ev==K85Nav::Select) {
+            error=""; dirty=true;
+            if (focus<chars) {
+                char add[]={k85edit::pages[page][focus],0};
+                if (!k85edit::append(text,limit+1,add)) error="FULL";
             } else {
-                size_t l = strlen(text);
-                if (l + 1 < sizeof(text)) {
-                    char c = key[0];
-                    if (!is_caps && !is_ru) c = (char)tolower((unsigned char)c);
-                    text[l] = c; text[l + 1] = 0;
-                }
+                int key=focus-chars;
+                if (key<5) { page=key; focus=0; }
+                else if (key==5) { if (!k85edit::append(text,limit+1," ")) error="FULL"; }
+                else if (key==6) k85edit::erase(text);
+                else if (key==7) {
+                    if (k85edit::commit(text,out,size,opt.allow_empty)) {
+                        std::memset(text,0,sizeof(text)); k85_nav_reset(); return true;
+                    }
+                    error="EMPTY";
+                } else if (key==8) { std::memset(text,0,sizeof(text)); k85_nav_reset(); return false; }
+                else if (key==9) shown=!shown;
+                else if (key==10) error="RU unavailable";
+                else if (key==11 && !k85edit::append(text,limit+1,"\n")) error="FULL";
             }
-            draw();
         }
-        if (k85_ab_held(500)) {
-            k85_wait_ab_release();
-            snprintf(out, out_size, "%s", text);
-            return true;
-        }
-        vTaskDelay(pdMS_TO_TICKS(30));
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
-
-bool k85_text_input_multiline(const char *prompt, const char *initial, char *out, size_t out_size) {
-    static EXT_RAM_BSS_ATTR char text[2048];
-    snprintf(text, sizeof(text), "%s", initial ? initial : "");
-
-    int st_row = 0, st_col = 0;
-    int64_t a_press_start = 0;
-    bool a_was_down = false;
-    bool a_hold_triggered = false;
-    const int hold_ms = 400;
-    int64_t last_imu_step_ms = 0;
-    const int64_t imu_step_cooldown_ms = 220;
-    const float imu_threshold = 0.35f;
-    bool is_ru = false;
-    bool is_caps = false;
-    int64_t last_activity_ms = k85_ti_ticks_ms();
-    bool kb_hidden = false;
-
-    int W = M5.Display.width();
-    int H = M5.Display.height();
-    uint32_t bg = k85_get_bg();
-    uint32_t fg = k85_get_fg();
-    uint32_t accent = k85_get_accent();
-
-    const int preview_rows = 3;
-    const int chars_per_row = W / 6;
-
-    auto draw = [&]() {
-        KbLayout kb = is_ru ? kb_layout_ru_ml() : kb_layout_en_ml();
-        if (st_col >= kb.counts[st_row]) st_col = kb.counts[st_row] - 1;
-
-        M5.Display.fillScreen(bg);
-        M5.Display.setTextSize(1);
-        M5.Display.setTextColor(accent, bg);
-        M5.Display.setCursor(4, 2);
-        M5.Display.printf("%s [%s/%s]", prompt, is_ru ? "RU" : "EN", is_caps ? "CAPS" : "low");
-
-        // Показываем "хвост" буфера - последние ~preview_rows*chars_per_row
-        // символов. При наборе длинного текста видимая часть естественно
-        // сдвигается вниз, показывая самое свежее (как обычный многострочный
-        // ввод, без отдельной навигации курсором).
-        size_t total_len = strlen(text);
-        size_t tail_chars = (size_t)(preview_rows * chars_per_row);
-        size_t start = total_len > tail_chars ? total_len - tail_chars : 0;
-
-        M5.Display.setTextSize(1);
-        M5.Display.setTextColor(fg, bg);
-        M5.Display.setCursor(4, 14);
-        M5.Display.setTextWrap(true, false);
-        M5.Display.printf("%s_", text + start);
-        M5.Display.setTextWrap(false, false);
-
-        if (kb_hidden) {
-            M5.Display.setTextColor(0x666666, bg);
-            const char *hint = "(press any button)";
-            int hx = (W - (int)strlen(hint) * 6) / 2;
-            M5.Display.setCursor(hx, H / 2);
-            M5.Display.print(hint);
-            k85_draw_battery_icon();
-            return;
-        }
-
-        int top = 14 + preview_rows * 10 + 4;
-        int row_h = (H - top - 2) / 5;
-        if (row_h < 12) row_h = 12;
-
-        for (int r = 0; r < 5; r++) {
-            int n = kb.counts[r];
-            int col_w = W / n;
-            for (int c = 0; c < n; c++) {
-                int x = c * col_w;
-                int y = top + r * row_h;
-                bool sel = (r == st_row && c == st_col);
-                uint32_t bgc = sel ? accent : 0x222222;
-                uint32_t fgc = sel ? 0x000000 : fg;
-                M5.Display.fillRect(x + 1, y + 1, col_w - 2, row_h - 2, bgc);
-                const char *label = kb.rows[r][c];
-                M5.Display.setTextSize(1);
-                M5.Display.setTextColor(fgc, bgc);
-                int lbl_len = (int)strlen(label);
-                int tx = x + (col_w - lbl_len * 6) / 2; if (tx < x) tx = x;
-                int ty = y + (row_h - 8) / 2; if (ty < y) ty = y;
-                M5.Display.setCursor(tx, ty);
-                M5.Display.print(label);
-            }
-        }
-        k85_draw_battery_icon();
-    };
-
-    draw();
+// 용어: 포커스=현재 선택할 키, commit=명시 확정 때 호출자에게 복사.
+bool k85_text_input(const char *p,const char *i,char *o,size_t s,const K85TextOptions &opt) { return edit(p,i,o,s,opt,false); }
+bool k85_text_input(const char *p,const char *i,char *o,size_t s) { return edit(p,i,o,s,{},false); }
+bool k85_text_input_multiline(const char *p,const char *i,char *o,size_t s) { return edit(p,i,o,s,{},true); }
+void k85_area_show(const char *const lines[],int count,const char *title) {
+    M5.Display.fillScreen(k85_get_bg()); M5.Display.setTextSize(1);
+    M5.Display.setTextColor(k85_get_fg(),k85_get_bg()); M5.Display.setCursor(2,2); M5.Display.println(title);
+    for (int i=0;i<count;i++) M5.Display.println(lines[i]);
+    k85_nav_reset();
     while (true) {
-        k85_input_update();
-        int64_t now = k85_ti_ticks_ms();
-        KbLayout kb = is_ru ? kb_layout_ru_ml() : kb_layout_en_ml();
-
-        float imu_ax = 0, imu_ay = 0, imu_az = 0;
-        if (g_config.kbd_nav_mode == 1) {
-            M5.Imu.getAccel(&imu_ax, &imu_ay, &imu_az); // TODO: сверь с air_mouse.cpp, если сигнатура другая
-        }
-        bool imu_tilted = (g_config.kbd_nav_mode == 1) &&
-                           (fabsf(imu_ax) > imu_threshold || fabsf(imu_ay) > imu_threshold);
-        bool any_input = k85_btn_a_is_down() || k85_btn_b_is_down() || imu_tilted;
-        if (any_input) {
-            if (kb_hidden) {
-                kb_hidden = false;
-                last_activity_ms = now;
-                draw();
-                vTaskDelay(pdMS_TO_TICKS(30));
-                continue;
-            }
-            last_activity_ms = now;
-        } else if (!kb_hidden && (now - last_activity_ms) >= K85_TI_KB_IDLE_MS) {
-            kb_hidden = true;
-            draw();
-        }
-
-        if (g_config.kbd_nav_mode == 1) {
-            if (now - last_imu_step_ms >= imu_step_cooldown_ms) {
-                bool moved = false;
-                if (imu_ax > imu_threshold) {
-                    st_col = (st_col + 1) % kb.counts[st_row];
-                    moved = true;
-                } else if (imu_ax < -imu_threshold) {
-                    st_col = (st_col - 1 + kb.counts[st_row]) % kb.counts[st_row];
-                    moved = true;
-                } else if (imu_ay > imu_threshold) {
-                    st_row = (st_row + 1) % 5;
-                    if (st_col > kb.counts[st_row] - 1) st_col = kb.counts[st_row] - 1;
-                    moved = true;
-                } else if (imu_ay < -imu_threshold) {
-                    st_row = (st_row - 1 + 5) % 5;
-                    if (st_col > kb.counts[st_row] - 1) st_col = kb.counts[st_row] - 1;
-                    moved = true;
-                }
-                if (moved) {
-                    k85_wake_screen();
-                    last_imu_step_ms = now;
-                    draw();
-                }
-            }
-        } else {
-            bool a_down_now = k85_btn_a_is_down();
-            if (a_down_now && !a_was_down) {
-                a_press_start = now;
-                a_hold_triggered = false;
-            }
-            if (a_down_now && !a_hold_triggered && (now - a_press_start) >= hold_ms) {
-                st_row = (st_row + 1) % 5;
-                if (st_col > kb.counts[st_row] - 1) st_col = kb.counts[st_row] - 1;
-                a_hold_triggered = true;
-                draw();
-            }
-            if (!a_down_now && a_was_down && !a_hold_triggered) {
-                k85_wake_screen();
-                st_col = (st_col + 1) % kb.counts[st_row];
-                draw();
-            }
-            a_was_down = a_down_now;
-        }
-        if (k85_btn_b_pressed()) {
-            k85_wake_screen();
-            const char *key = kb.rows[st_row][st_col];
-            if (!strcmp(key, "SPACE")) {
-                size_t l = strlen(text);
-                if (l + 1 < sizeof(text)) { text[l] = ' '; text[l + 1] = 0; }
-            } else if (!strcmp(key, "ENTER")) {
-                size_t l = strlen(text);
-                if (l + 1 < sizeof(text)) { text[l] = '\n'; text[l + 1] = 0; }
-            } else if (!strcmp(key, "DEL")) {
-                size_t l = strlen(text);
-                if (l > 0) text[l - 1] = 0;
-            } else if (!strcmp(key, "EXIT")) {
-                return false;
-            } else if (!strcmp(key, "OK")) {
-                snprintf(out, out_size, "%s", text);
-                return true;
-            } else if (!strcmp(key, "EN") || !strcmp(key, "RU")) {
-                is_ru = !strcmp(key, "RU");
-                st_row = 0; st_col = 0;
-            } else if (!strcmp(key, "CAPS")) {
-                is_caps = !is_caps;
-            } else {
-                size_t l = strlen(text);
-                if (l + 1 < sizeof(text)) {
-                    char c = key[0];
-                    if (!is_caps && !is_ru) c = (char)tolower((unsigned char)c);
-                    text[l] = c; text[l + 1] = 0;
-                }
-            }
-            draw();
-        }
-        if (k85_ab_held(500)) {
-            k85_wait_ab_release();
-            snprintf(out, out_size, "%s", text);
-            return true;
-        }
-        vTaskDelay(pdMS_TO_TICKS(30));
-    }
-}
-
-void k85_area_show(const char *const lines[], int count, const char *title) {
-    uint32_t bg = k85_get_bg();
-    uint32_t fg = k85_get_fg();
-    uint32_t accent = k85_get_accent();
-
-    M5.Display.fillScreen(bg);
-    M5.Display.setTextSize(1);
-    M5.Display.setTextColor(accent, bg);
-    M5.Display.setCursor(4, 2);
-    M5.Display.print(title);
-
-    int y = 16;
-    for (int i = 0; i < count; i++) {
-        M5.Display.setTextColor(fg, bg);
-        M5.Display.setCursor(4, y);
-        M5.Display.print(lines[i]);
-        y += 12;
-    }
-    M5.Display.setTextColor(0xAAAAAA, bg);
-    M5.Display.setCursor(4, M5.Display.height() - 12);
-    M5.Display.print("A+B=back");
-    k85_draw_battery_icon();
-
-    while (true) {
-        k85_input_update();
-        if (k85_ab_held(500)) {
-            k85_wait_ab_release();
-            return;
-        }
-        vTaskDelay(pdMS_TO_TICKS(30));
+        k85_input_update(); auto ev=k85_nav_take();
+        if (ev==K85Nav::Back || ev==K85Nav::EmergencyBack || k85_ab_held(500)) { k85_wait_ab_release(); return; }
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }

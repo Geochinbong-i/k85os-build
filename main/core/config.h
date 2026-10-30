@@ -10,7 +10,9 @@
 // ---------- LittleFS ----------
 #define K85_LITTLEFS_PART_LABEL "storage"
 #define K85_LITTLEFS_BASE_PATH  "/littlefs"
+#ifndef CONFIG_FILE_PATH
 #define CONFIG_FILE_PATH        "/littlefs/k85os_config.json"
+#endif
 
 #define K85_MAX_WIFI_NETWORKS 3
 
@@ -37,6 +39,17 @@ typedef struct {
     int brightness_active;
     int device_name_idx;
     int rotation;
+    // 튜닝: 프로필 0=Bruce/1=Legacy, 감도·데드존 0=낮음/1=보통/2=높음.
+    int navigation_profile;
+    bool navigation_swap;
+    bool imu_follow_rotation;
+    bool imu_swap_xy;
+    bool imu_invert_x;
+    bool imu_invert_y;
+    int imu_sensitivity;
+    int imu_deadzone;
+    float imu_neutral_x;
+    float imu_neutral_y;
     int bootstyle_idx;
     int kb_layout;
     int kbd_nav_mode; // 0=Classic (A/B buttons), 1=IMU (tilt navigation)
@@ -125,6 +138,7 @@ bool k85_fs_info(size_t *total_bytes, size_t *used_bytes); // СЂР°Р·РјР
 void k85_config_defaults(k85_config_t *cfg);
 bool k85_config_load(void);          // load + deep-merge РґРµС„РѕР»С‚РѕРІ
 bool k85_config_save(void);
+bool k85_config_restore_file(const char *path);
 
 int  k85_get_high_score(const char *game);
 bool k85_set_high_score_if_better(const char *game, int value);

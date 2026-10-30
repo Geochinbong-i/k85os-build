@@ -1,3 +1,4 @@
+#include "core/control_motion.h"
 // k85OS v4.1 — порт на ESP-IDF C++
 // Слой 4: core/rtc_ntp + steps/step_counter + core/device + system/system_info + system/logs_screen
 
@@ -108,7 +109,7 @@ extern "C" void app_main(void) {
     // TODO: подставить сюда реальный вызов инициализации BT, когда появится отдельная функция
     k85_post_report_check(post_report, PostCode::BT_INIT, true);
 
-    M5.Display.setRotation(g_config.rotation);
+    k85_display_rotation(g_config.rotation);
 
     k85_power_init();
     M5.Display.setBrightness(g_config.brightness_active);
@@ -154,6 +155,17 @@ extern "C" void app_main(void) {
             continue;
         }
 
+        if (g_config.navigation_profile>=0) {
+            if (g_config.desktop_mode) k85_menu_desktop_tick();
+            else {
+                auto ev=k85_nav_take();
+                if (ev==K85Nav::Next) k85_menu_next();
+                if (ev==K85Nav::Previous) k85_menu_prev();
+                if (ev==K85Nav::Select) { k85_menu_activate(); k85_nav_reset(); }
+                if (ev==K85Nav::Back || ev==K85Nav::EmergencyBack) { k85_menu_draw(); k85_nav_reset(); }
+            }
+            vTaskDelay(pdMS_TO_TICKS(20)); continue;
+        }
         if (g_config.desktop_mode) {
             k85_menu_desktop_tick();
             vTaskDelay(pdMS_TO_TICKS(30));

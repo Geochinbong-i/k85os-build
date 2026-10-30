@@ -1,4 +1,6 @@
 #include "settings_menu.h"
+#include "core/control_motion.h"
+#include "list_menu.h"
 #include "config.h"
 #include "theme.h"
 #include "power.h"
@@ -34,13 +36,13 @@
 #include <cstring>
 #include <cmath>
 
-#define K85_SETTINGS_ITEM_COUNT 21
+#define K85_SETTINGS_ITEM_COUNT 23
 #define K85_SETTINGS_BACK_IDX   (K85_SETTINGS_ITEM_COUNT - 1)
 
 static const char *k85_settings_labels[K85_SETTINGS_ITEM_COUNT] = {
     "Theme", "Brightness", "Battery mode", "Boot style",
     "Device name", "Sound volume", "WiFi", "Reset steps",
-    "Check for updates", "Screen lock", "Status bar", "BG gradient", "Lock screen", "Menu UI style", "CPU freq", "Power", "Font", "Keyboard nav", "Cursor", "Desktop", "Back",
+    "Check for updates", "Screen lock", "Status bar", "BG gradient", "Lock screen", "Menu UI style", "CPU freq", "Power", "Font", "Keyboard nav", "Cursor", "Desktop", "Controls", "Display", "Back",
 };
 
 static int s_selected = 0;
@@ -456,7 +458,7 @@ static void settings_apply_item(int idx) {
                 k85_show_message("Connect WiFi first\nA+B=back");
                 while (true) {
                     k85_input_update();
-                    if (k85_ab_held(500)) { k85_wait_ab_release(); break; }
+                    if (k85_ui_cancel()) { k85_wait_ab_release(); break; }
                     vTaskDelay(pdMS_TO_TICKS(30));
                 }
                 break;
@@ -469,7 +471,7 @@ static void settings_apply_item(int idx) {
                 k85_show_message("No update found\nA+B=back");
                 while (true) {
                     k85_input_update();
-                    if (k85_ab_held(500)) { k85_wait_ab_release(); break; }
+                    if (k85_ui_cancel()) { k85_wait_ab_release(); break; }
                     vTaskDelay(pdMS_TO_TICKS(30));
                 }
                 break;
@@ -482,8 +484,8 @@ static void settings_apply_item(int idx) {
             bool do_install = false;
             while (true) {
                 k85_input_update();
-                if (k85_ab_held(500)) { k85_wait_ab_release(); do_install = false; break; }
-                if (k85_btn_b_pressed()) { do_install = true; break; }
+                if (k85_ui_cancel()) { k85_wait_ab_release(); do_install = false; break; }
+                if (k85_nav_is(K85Nav::Select)) { do_install = true; break; }
                 vTaskDelay(pdMS_TO_TICKS(30));
             }
             if (!do_install) break;
@@ -501,18 +503,18 @@ static void settings_apply_item(int idx) {
             }
             while (true) {
                 k85_input_update();
-                if (k85_ab_held(500)) { k85_wait_ab_release(); break; }
+                if (k85_ui_cancel()) { k85_wait_ab_release(); break; }
                 vTaskDelay(pdMS_TO_TICKS(30));
             }
             break;
         }
         case 9: {
             if (g_config.lock_enabled) {
-                k85_show_message("Disable screen lock?\nB=confirm A+B=cancel");
+                k85_show_message("Disable screen lock?\nSelect=confirm Back=cancel");
                 while (true) {
                     k85_input_update();
-                    if (k85_ab_held(500)) { k85_wait_ab_release(); goto lock_done; }
-                    if (k85_btn_b_pressed()) break;
+                    if (k85_ui_cancel()) { k85_wait_ab_release(); goto lock_done; }
+                    if (k85_nav_is(K85Nav::Select)) break;
                     vTaskDelay(pdMS_TO_TICKS(30));
                 }
                 g_config.lock_enabled = false;
@@ -520,18 +522,18 @@ static void settings_apply_item(int idx) {
                 k85_show_message("Screen lock disabled\nA+B=back");
                 while (true) {
                     k85_input_update();
-                    if (k85_ab_held(500)) { k85_wait_ab_release(); break; }
+                    if (k85_ui_cancel()) { k85_wait_ab_release(); break; }
                     vTaskDelay(pdMS_TO_TICKS(30));
                 }
             } else {
                 char pass[32] = "";
-                if (k85_text_input("Set lock password:", "", pass, sizeof(pass)) && pass[0]) {
+                if (k85_text_input("Set lock password:", "", pass, sizeof(pass), K85TextOptions{true,0,true}) && pass[0]) {
                     k85_lock_hash_password(pass, g_config.lock_password, sizeof(g_config.lock_password));
                     g_config.lock_enabled = true;
                     k85_show_message("Screen lock enabled\nA+B=back");
                     while (true) {
                         k85_input_update();
-                        if (k85_ab_held(500)) { k85_wait_ab_release(); break; }
+                        if (k85_ui_cancel()) { k85_wait_ab_release(); break; }
                         vTaskDelay(pdMS_TO_TICKS(30));
                     }
                 }
@@ -557,7 +559,7 @@ static void settings_apply_item(int idx) {
                 k85_show_message("Warning: 80MHz may\ncause WiFi/BT issues\nA+B=back");
                 while (true) {
                     k85_input_update();
-                    if (k85_ab_held(500)) { k85_wait_ab_release(); break; }
+                    if (k85_ui_cancel()) { k85_wait_ab_release(); break; }
                     vTaskDelay(pdMS_TO_TICKS(30));
                 }
             }
@@ -579,6 +581,8 @@ static void settings_apply_item(int idx) {
         case 19:
             g_config.desktop_mode = !g_config.desktop_mode;
             break;
+        case 20: k85_controls_menu(); break;
+        case 21: k85_display_menu(); break;
         default:
             break;
     }
@@ -636,6 +640,18 @@ static int settings_hit_test(void) {
 }
 
 void k85_run_settings_menu(void) {
+    // 목록 공통 경로를 사용하여 회전별 가시 행과 조작 프로필을 일치시킨다.
+    while (g_config.navigation_profile>=0) {
+        char labels[K85_SETTINGS_ITEM_COUNT][96]; const char *items[K85_SETTINGS_ITEM_COUNT];
+        for (int i=0;i<K85_SETTINGS_ITEM_COUNT;i++) {
+            char value[48]; settings_value_str(value,sizeof(value),i);
+            snprintf(labels[i],sizeof(labels[i]),"%s%s%s",k85_settings_labels[i],value[0]?": ":"",value);
+            items[i]=labels[i];
+        }
+        int n=k85_run_list_menu("Settings",items,K85_SETTINGS_ITEM_COUNT,nullptr);
+        if (n<0 || n==K85_SETTINGS_BACK_IDX) return;
+        settings_apply_item(n); k85_nav_reset();
+    }
     s_selected = 0;
     s_scroll_top = 0;
     settings_draw();
@@ -650,7 +666,7 @@ void k85_run_settings_menu(void) {
     while (true) {
         k85_input_update();
 
-        if (k85_ab_held(500)) {
+        if (k85_ui_cancel()) {
             k85_wait_ab_release();
             k85_config_save();
             return;
@@ -712,7 +728,7 @@ void k85_run_settings_menu(void) {
             settings_draw();
         }
 
-        if (k85_btn_b_pressed()) {
+        if (k85_nav_is(K85Nav::Select)) {
             if (s_selected == K85_SETTINGS_BACK_IDX) {
                 k85_config_save();
                 return;

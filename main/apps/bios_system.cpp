@@ -28,7 +28,7 @@
 static void wait_ab_exit(void) {
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); return; }
+        if (k85_ui_cancel()) { k85_wait_ab_release(); return; }
         vTaskDelay(pdMS_TO_TICKS(30));
     }
 }
@@ -43,8 +43,8 @@ static bool confirm_msg(const char *msg) {
     k85_wait_ab_release();
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); return false; }
-        if (k85_btn_b_pressed()) return true;
+        if (k85_ui_cancel()) { k85_wait_ab_release(); return false; }
+        if (k85_nav_is(K85Nav::Select)) return true;
         vTaskDelay(pdMS_TO_TICKS(30));
     }
 }
@@ -168,11 +168,11 @@ static void rp_create(void) {
 
 static void rp_restore(const RpEntry &e) {
     char msg[96];
-    snprintf(msg, sizeof(msg), "Restore point %03d?\nDevice will reboot\nB=confirm A+B=cancel", e.n);
+    snprintf(msg, sizeof(msg), "Restore point %03d?\nDevice will reboot\nSelect=confirm Back=cancel", e.n);
     if (!confirm_msg(msg)) return;
     char src[96];
     snprintf(src, sizeof(src), RP_DIR "/%s", e.name);
-    if (!copy_file(src, "/littlefs/k85os_config.json.tmp", CONFIG_FILE_PATH)) { show_and_wait("Restore failed\nA+B=back"); return; }
+    if (!k85_config_restore_file(src)) { show_and_wait("Restore failed\nA+B=back"); return; }
     k85_show_message("Config restored\nRebooting...");
     vTaskDelay(pdMS_TO_TICKS(1200));
     esp_restart();
@@ -203,7 +203,7 @@ void k85_run_restore_points(void) {
         if (act == 0) {
             rp_restore(e);
         } else if (act == 1) {
-            if (confirm_msg("Delete this restore\npoint?\nB=confirm A+B=cancel")) {
+            if (confirm_msg("Delete this restore\npoint?\nSelect=confirm Back=cancel")) {
                 char path[96];
                 snprintf(path, sizeof(path), RP_DIR "/%s", e.name);
                 unlink(path);

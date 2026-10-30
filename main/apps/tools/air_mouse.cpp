@@ -4,6 +4,8 @@
 #include "power.h"
 #include "input.h"
 #include "common.h"
+#include "core/control_motion.h"
+#include "esp_timer.h"
 #include "sound.h"
 
 #include "M5Unified.h"
@@ -23,8 +25,8 @@ void k85_run_air_mouse(void) {
     uint32_t bg = k85_get_bg();
     uint32_t fg = k85_get_fg();
 
-    int cursor_x = W / 2;
-    int cursor_y = H / 2;
+    float cursor_x = W / 2.0f, cursor_y = H / 2.0f;
+    int64_t last_us=esp_timer_get_time(); k85_control_motion_reset();
 
     auto draw_crosshair = [&](int x, int y, bool left_clicked, bool right_clicked) {
         M5.Display.fillScreen(bg);
@@ -50,11 +52,9 @@ void k85_run_air_mouse(void) {
             k85_wait_ab_release();
             return;
         }
-        float ax = 0, ay = 0, az = 0;
-        M5.Imu.getAccel(&ax, &ay, &az);
-
-        cursor_x -= (int)(ax * 6);
-        cursor_y += (int)(ay * 6);
+        K85Vec v; int64_t now=esp_timer_get_time();
+        float dt=k85_safe_dt(float(now-last_us)/1000000); last_us=now;
+        if (k85_control_vector(v)) { cursor_x+=v.x*180*dt; cursor_y+=v.y*180*dt; }
         if (cursor_x < 2) cursor_x = 2;
         if (cursor_x > W - 2) cursor_x = W - 2;
         if (cursor_y < 2) cursor_y = 2;

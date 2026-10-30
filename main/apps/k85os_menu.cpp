@@ -120,7 +120,7 @@ static void bios_value_str(char *out, size_t out_size, int idx) {
 static void wait_ab_exit(void) {
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); return; }
+        if (k85_ui_cancel()) { k85_wait_ab_release(); return; }
         vTaskDelay(pdMS_TO_TICKS(30));
     }
 }
@@ -222,12 +222,12 @@ static void show_post_info(void) {
 
 static bool confirm_action(const char *label) {
     char msg[80];
-    snprintf(msg, sizeof(msg), "%s?\nB=confirm A+B=cancel", label);
+    snprintf(msg, sizeof(msg), "%s?\nSelect=confirm Back=cancel", label);
     k85_show_message(msg);
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); return false; }
-        if (k85_btn_b_pressed()) return true;
+        if (k85_ui_cancel()) { k85_wait_ab_release(); return false; }
+        if (k85_nav_is(K85Nav::Select)) return true;
         vTaskDelay(pdMS_TO_TICKS(30));
     }
 }
@@ -242,14 +242,14 @@ static void run_rollback(void) {
 
     char msg[160];
     snprintf(msg, sizeof(msg),
-        "Rollback to %s?\nWARNING: if that slot\nis empty/broken,\ndevice may hang.\nB=confirm A+B=cancel",
+        "Rollback to %s?\nWARNING: if that slot\nis empty/broken,\ndevice may hang.\nSelect=confirm Back=cancel",
         next->label);
     k85_show_message(msg);
 
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); return; }
-        if (k85_btn_b_pressed()) break;
+        if (k85_ui_cancel()) { k85_wait_ab_release(); return; }
+        if (k85_nav_is(K85Nav::Select)) break;
         vTaskDelay(pdMS_TO_TICKS(30));
     }
 
@@ -388,13 +388,13 @@ static void run_customization_menu(void) {
     draw();
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); return; }
+        if (k85_ui_cancel()) { k85_wait_ab_release(); return; }
         if (k85_btn_a_pressed()) {
             selected = (selected + 1) % CUST_COUNT;
             k85_voice_say(labeled[selected]);
             draw();
         }
-        if (k85_btn_b_pressed()) {
+        if (k85_nav_is(K85Nav::Select)) {
             if (selected == 5) { return; }
             if (selected == 4) {
                 g_config.bios_ui_style = (g_config.bios_ui_style + 1) % 3;
@@ -889,6 +889,14 @@ static int bios_hit_test(void) {
 
 void k85_run_bios_menu(void) {
     if (!k85_bios_password_gate()) return;
+    while (g_config.navigation_profile>=0) {
+        const char *items[K85_BIOS_ITEM_COUNT+1];
+        for(int i=0;i<K85_BIOS_ITEM_COUNT;i++) items[i]=k85_bios_labels[i];
+        items[K85_BIOS_ITEM_COUNT]="Back";
+        int selected=k85_run_list_menu("BIOS",items,K85_BIOS_ITEM_COUNT+1,nullptr);
+        if(selected<0 || selected==K85_BIOS_ITEM_COUNT) return;
+        bios_apply(selected); k85_nav_reset();
+    }
     s_selected = 0;
     k85_voice_say(k85_bios_labels[s_selected]);
     s_scroll_top = 0;
@@ -903,7 +911,7 @@ void k85_run_bios_menu(void) {
     while (true) {
         k85_input_update();
 
-        if (k85_ab_held(500)) {
+        if (k85_ui_cancel()) {
             k85_wait_ab_release();
             return;
         }
@@ -941,7 +949,7 @@ void k85_run_bios_menu(void) {
             k85_voice_say(k85_bios_labels[s_selected]); // K85V:bios
             bios_draw();
         }
-        if (k85_btn_b_pressed()) {
+        if (k85_nav_is(K85Nav::Select)) {
             bios_apply(s_selected);
             bios_draw();
         }

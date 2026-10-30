@@ -1,0 +1,51 @@
+name: Build K85 OS custom
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: k85-custom-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  host-checks:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Host test dependencies
+        run: sudo apt-get update && sudo apt-get install -y g++ libcjson-dev libmbedtls-dev
+      - name: Test production logic and storage failures with sanitizers
+        run: bash tests/host/run.sh
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Build this repository commit and package actual flash files
+        uses: espressif/esp-idf-ci-action@9d38657f3d789ca759b2b37aaf5ceffbc42c4f0d
+        with:
+          esp_idf_version: v5.3.1
+          target: esp32s3
+          command: idf.py build && python tools/package_build.py
+      - name: Upload firmware and build provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: k85OS-custom-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload resolved dependency lock even on build failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dependency-lock-${{ github.sha }}
+          path: dependencies.lock
+          if-no-files-found: ignore
+          retention-days: 30

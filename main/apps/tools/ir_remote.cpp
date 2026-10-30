@@ -1,3 +1,4 @@
+#include "core/control_motion.h"
 // K85IR2: IR remote v2 - IR TX / IR RX / Saved codes, portrait view while inside this tool
 #include "ir_remote.h"
 #include "common.h"
@@ -310,12 +311,12 @@ static int s_old_rot = 0;
 static void ir_enter_screen(void) {
     s_old_rot = M5.Display.getRotation();
     int r = (s_old_rot & 4) | (((s_old_rot & 3) + K85_IR_ROT_STEP) & 3);
-    M5.Display.setRotation(r);
+    k85_display_rotation(r);
     M5.Display.fillScreen(k85_get_bg());
 }
 
 static void ir_leave_screen(void) {
-    M5.Display.setRotation(s_old_rot);   // always back to the normal orientation
+    k85_display_rotation(s_old_rot);   // always back to the normal orientation
     M5.Display.fillScreen(k85_get_bg());
 }
 

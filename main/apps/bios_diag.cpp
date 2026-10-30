@@ -57,7 +57,7 @@ static void put_row(int row, const char *txt, const Pal &p) {
 static void wait_ab_exit(void) {
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); return; }
+        if (k85_ui_cancel()) { k85_wait_ab_release(); return; }
         vTaskDelay(pdMS_TO_TICKS(30));
     }
 }
@@ -72,8 +72,8 @@ static bool confirm_msg(const char *msg) {
     k85_wait_ab_release();
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); return false; }
-        if (k85_btn_b_pressed()) return true;
+        if (k85_ui_cancel()) { k85_wait_ab_release(); return false; }
+        if (k85_nav_is(K85Nav::Select)) return true;
         vTaskDelay(pdMS_TO_TICKS(30));
     }
 }
@@ -88,8 +88,8 @@ static void test_display(void) {
     static const uint32_t bars[8] = { 0xFFFFFF, 0xFFFF00, 0x00FFFF, 0x00FF00, 0xFF00FF, 0xFF0000, 0x0000FF, 0x000000 };
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); return; }
-        if (k85_btn_b_pressed()) { page = (page + 1) % pages; redraw = true; }
+        if (k85_ui_cancel()) { k85_wait_ab_release(); return; }
+        if (k85_nav_is(K85Nav::Select)) { page = (page + 1) % pages; redraw = true; }
         if (redraw) {
             redraw = false;
             switch (page) {
@@ -125,7 +125,7 @@ static void test_buttons(void) {
     int ca = 0, cb = 0;
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); return; }
+        if (k85_ui_cancel()) { k85_wait_ab_release(); return; }
         bool a = M5.BtnA.isPressed();
         bool b = M5.BtnB.isPressed();
         if (a && !prev_a) ca++;
@@ -163,7 +163,7 @@ static void test_imu(void) {
     put_row(7, "A+B=exit", p);
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); return; }
+        if (k85_ui_cancel()) { k85_wait_ab_release(); return; }
         M5.Imu.update();
         auto data = M5.Imu.getImuData();
         char line[48];
@@ -184,7 +184,7 @@ static void test_rtc(void) {
     put_row(4, "A+B=exit", p);
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); return; }
+        if (k85_ui_cancel()) { k85_wait_ab_release(); return; }
         auto dt = M5.Rtc.getDateTime();
         char line[48];
         snprintf(line, sizeof(line), "Date: %04d-%02d-%02d", (int)dt.date.year, (int)dt.date.month, (int)dt.date.date);
@@ -353,7 +353,7 @@ static void boot_other_slot(void) {
     if (idx < 0 || idx >= n) return;
 
     char msg[160];
-    snprintf(msg, sizeof(msg), "Boot %s (%.16s)?\nPackage: %.24s\nB=confirm A+B=cancel",
+    snprintf(msg, sizeof(msg), "Boot %s (%.16s)?\nPackage: %.24s\nSelect=confirm Back=cancel",
              cand[idx]->label, descs[idx].project_name, g_config.alt_slot_name[0] ? g_config.alt_slot_name : "-");
     if (!confirm_msg(msg)) return;
 

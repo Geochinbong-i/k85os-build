@@ -1,4 +1,5 @@
 #include "ui/quick_settings.h"
+#include "ui/list_menu.h"
 #include "voice.h" // K85V:inc
 #include "M5Unified.h"
 #include "core/config.h"
@@ -51,7 +52,7 @@ static void qs_run_flashlight(void) {
     k85_wait_ab_release();
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) {
+        if (k85_ui_cancel()) {
             k85_wait_ab_release();
             M5.Display.setBrightness(g_config.brightness_active);
             return;
@@ -173,6 +174,12 @@ static void qs_draw(void) {
 }
 
 void k85_quick_settings_open(void) {
+    while (g_config.navigation_profile>=0) {
+        const char *items[]={"Brightness","WiFi","Bluetooth","Flashlight","Sound","Profile","Back"};
+        int selected=k85_run_list_menu("Quick settings",items,K85_QS_ITEM_COUNT,nullptr);
+        if(selected<0 || selected==QS_BACK) return;
+        s_qs_selected=selected; qs_activate_selected(); k85_nav_reset();
+    }
     s_qs_selected = 0;
     qs_voice_item(0);
     k85_wait_ab_release();
@@ -181,7 +188,7 @@ void k85_quick_settings_open(void) {
     while (true) {
         k85_input_update();
 
-        if (k85_ab_held(500)) {
+        if (k85_ui_cancel()) {
             k85_wait_ab_release();
             return;
         }
@@ -192,7 +199,7 @@ void k85_quick_settings_open(void) {
             qs_draw();
         }
 
-        if (k85_btn_b_pressed()) {
+        if (k85_nav_is(K85Nav::Select)) {
             if (s_qs_selected == QS_BACK) {
                 return;
             }

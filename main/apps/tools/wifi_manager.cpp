@@ -41,7 +41,7 @@ static void scan_and_connect(void) {
     if (idx < 0 || idx >= n) return;
 
     char password[64] = "";
-    if (!k85_text_input("Enter password:", "", password, sizeof(password))) return;
+    if (!k85_text_input("Enter password:", "", password, sizeof(password), K85TextOptions{true,63,true})) return;
 
     k85_show_message("Connecting...");
     bool ok = k85_wifi_connect(ssids[idx], password);

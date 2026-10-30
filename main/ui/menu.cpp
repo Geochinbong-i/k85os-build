@@ -1,4 +1,5 @@
 #include "menu.h"
+#include "quick_settings.h"
 #include "voice.h" // K85V:inc
 #include <cstdio>
 #include "common.h"
@@ -37,7 +38,7 @@
 
 static const char *const K85_MENU_ITEMS[] = {
     "Low tone", "High tone", "Both tones", "Cube", "Colors",
-    "Clock", "WiFi", "Apps", "Tools", "Games", "Linux", "Interpreter", "Settings", "System info", "Logs", "Notifications",
+    "Clock", "WiFi", "Apps", "Tools", "Games", "Linux", "Interpreter", "Settings", "System info", "Logs", "Notifications", "Quick settings",
 };
 #define K85_MENU_ITEM_COUNT (int)(sizeof(K85_MENU_ITEMS) / sizeof(K85_MENU_ITEMS[0]))
 
@@ -604,6 +605,8 @@ static void run_action(int index) {
         k85_run_system_info();
     } else if (!strcmp(item, "Logs")) {
         k85_run_logs_screen();
+    } else if (!strcmp(item, "Quick settings")) {
+        k85_quick_settings_open();
     } else if (!strcmp(item, "Notifications")) {
         k85_run_notifications_screen();
     } else if (!strcmp(item, "Settings")) {
@@ -758,7 +761,15 @@ static int desktop_hit_test(int count) {
 static int64_t s_desktop_edge_last_us = 0;
 
 void k85_menu_desktop_tick(void) {
-    k85_cursor_update();
+    if (g_config.navigation_profile==0) {
+        auto ev=k85_nav_take();
+        if (ev==K85Nav::Next) k85_menu_next();
+        if (ev==K85Nav::Previous) k85_menu_prev();
+        if (ev==K85Nav::Select) { k85_menu_activate(); k85_nav_reset(); }
+        if (ev==K85Nav::Back || ev==K85Nav::EmergencyBack) k85_nav_reset();
+        k85_menu_draw(); return;
+    }
+    if (k85_cursor_active()) k85_cursor_update();
 
     const char *items[K85_MENU_ITEM_COUNT];
     int count = get_filtered_menu(items, K85_MENU_ITEM_COUNT);

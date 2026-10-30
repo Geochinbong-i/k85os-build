@@ -1,18 +1,9 @@
 #pragma once
 #include <cstddef>
-
-// Возвращает true если пользователь подтвердил ввод (OK либо A+B held), false если Exit.
-// Результат кладётся в out (обрезается по out_size). initial — стартовый текст (можно "").
-bool k85_text_input(const char *prompt, const char *initial, char *out, size_t out_size);
-
-// Многострочный редактор той же клавиатурой (A=след. клавиша, hold A=след.
-// строка клавиатуры, B=выбрать, A+B=сохранить и выйти). Добавлена клавиша
-// ENTER (вставляет перенос строки в текст). Верхняя область показывает
-// последние строки буфера - при наборе длинного текста видимая часть
-// естественно "сдвигается вниз", как обычный многострочный ввод.
-// initial - исходное содержимое (можно многострочным, "" для нового файла).
-// Возвращает true при сохранении (OK/A+B held), false при Exit (изменения отбрасываются).
-bool k85_text_input_multiline(const char *prompt, const char *initial, char *out, size_t out_size);
-
-// Простой экран из нескольких строк текста с заголовком, ждёт A+B для выхода.
-void k85_area_show(const char *const lines[], int count, const char *title);
+// 튜닝: max_bytes=0이면 out_size-1. secret은 기본 숨김, allow_empty는 빈 확정 허용.
+struct K85TextOptions { bool secret=false; size_t max_bytes=0; bool allow_empty=true; };
+// OK만 true이며 X/BACK/A+B는 false와 출력 불변. 과길이 입력은 추가 거절한다.
+bool k85_text_input(const char*,const char*,char*,size_t,const K85TextOptions&);
+bool k85_text_input(const char*,const char*,char*,size_t);
+bool k85_text_input_multiline(const char*,const char*,char*,size_t);
+void k85_area_show(const char *const[],int,const char*);

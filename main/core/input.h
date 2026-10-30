@@ -1,6 +1,14 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#include "navigation.h"
+
+// 한 화면에서 한 번 소비. raw 버튼 함수는 게임 등 기존 동작을 위해 유지한다.
+K85Nav k85_nav_take();
+bool k85_nav_is(K85Nav event);
+bool k85_ui_cancel();
+void k85_nav_reset();
+const char *k85_nav_hint();
 
 // Вызывать раз за цикл (обёртка над M5.update())
 void k85_input_update(void);

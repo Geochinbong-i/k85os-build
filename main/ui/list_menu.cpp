@@ -15,6 +15,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cctype>
+#include <algorithm>
 
 // Универсальная иконка-фолбэк для пунктов, для которых вызывающий код не
 // передал свой icon_fn: кружок акцентного цвета с первой заглавной буквой
@@ -296,6 +297,25 @@ int k85_run_list_menu(const char *title, const char *const items[], int count,
     k85_log("list_menu ENTER: title=%s count=%d btnB_down=%d", title, count, (int)k85_btn_b_is_down());
     if (count <= 0) return -1;
 
+    if (g_config.navigation_profile>=0) {
+        int sel=0,scroll=0; k85_nav_reset();
+        while (true) {
+            int style=g_config.menu_ui_style;
+            int visible=std::max(1,(M5.Display.height()-16)/(style==2?22:24));
+            if (sel<scroll) scroll=sel;
+            if (sel>=scroll+visible) scroll=sel-visible+1;
+            auto bg=k85_get_bg(),fg=k85_get_fg(),accent=k85_get_accent();
+            if (style==1) draw_list_grid(title,items,count,score_keys,sel,bg,fg,accent,icon_fn);
+            else if (style==2) draw_list_icons(title,items,count,score_keys,sel,scroll,bg,fg,accent,icon_fn);
+            else draw_list_plain(title,items,count,score_keys,sel,scroll,bg,fg,accent);
+            k85_input_update(); auto ev=k85_nav_take();
+            if (ev==K85Nav::Back || ev==K85Nav::EmergencyBack) { k85_nav_reset(); return -1; }
+            if (ev==K85Nav::Next) sel=(sel+1)%count;
+            if (ev==K85Nav::Previous) sel=(sel+count-1)%count;
+            if (ev==K85Nav::Select) { k85_nav_reset(); return !strcmp(items[sel],"Back")?-1:sel; }
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+    }
     if (k85_cursor_active()) {
         return run_list_menu_cursor_mode(title, items, count, score_keys, icon_fn);
     }

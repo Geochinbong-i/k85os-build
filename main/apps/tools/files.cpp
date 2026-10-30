@@ -11,6 +11,7 @@
 #include "../../core/bios_theme.h"
 #include "../../core/boot_theme.h"
 #include "../../core/config.h"
+#include "core/fs_guard.h"
 #include "music_player.h"
 
 #include "M5Unified.h"
@@ -60,7 +61,7 @@ static bool k85_copy_safe(const char *src, const char *dst) {
 static void wait_ab_exit(void) {
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); return; }
+        if (k85_ui_cancel()) { k85_wait_ab_release(); return; }
         vTaskDelay(pdMS_TO_TICKS(30));
     }
 }
@@ -119,7 +120,7 @@ static void read_file_view(const char *full_path, const char *name, long size) {
 
         while (true) {
             k85_input_update();
-            if (k85_ab_held(500)) { k85_wait_ab_release(); return; }
+            if (k85_ui_cancel()) { k85_wait_ab_release(); return; }
             if (k85_btn_a_pressed()) { page = (page + 1) % page_count; break; }
             vTaskDelay(pdMS_TO_TICKS(30));
         }
@@ -161,12 +162,12 @@ static void write_file_edit(const char *full_path, const char *name) {
 // закрыть меню действий и обновить список).
 static bool delete_file_confirm(const char *full_path, const char *name) {
     char msg[96];
-    snprintf(msg, sizeof(msg), "Delete %.40s?\nB=confirm A+B=cancel", name);
+    snprintf(msg, sizeof(msg), "Delete %.40s?\nSelect=confirm Back=cancel", name);
     k85_show_message(msg);
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); return false; }
-        if (k85_btn_b_pressed()) break;
+        if (k85_ui_cancel()) { k85_wait_ab_release(); return false; }
+        if (k85_nav_is(K85Nav::Select)) break;
         vTaskDelay(pdMS_TO_TICKS(30));
     }
     bool ok = (remove(full_path) == 0);
@@ -196,13 +197,13 @@ static void run_file(const char *full_path, const char *name) {
     }
 
     char msg[96];
-    snprintf(msg, sizeof(msg), "Apply %.40s\nas active theme?\nB=confirm A+B=cancel", name);
+    snprintf(msg, sizeof(msg), "Apply %.40s\nas active theme?\nSelect=confirm Back=cancel", name);
     k85_show_message(msg);
     bool confirmed = false;
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); return; }
-        if (k85_btn_b_pressed()) { confirmed = true; break; }
+        if (k85_ui_cancel()) { k85_wait_ab_release(); return; }
+        if (k85_nav_is(K85Nav::Select)) { confirmed = true; break; }
         vTaskDelay(pdMS_TO_TICKS(30));
     }
     if (!confirmed) return;
@@ -300,6 +301,7 @@ static int fb_list_entries(const char *dir_path, FbEntry out[], int max_n) {
     struct dirent *ent;
     while ((ent = readdir(d)) != nullptr && n < max_n) {
         if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) continue;
+        if (k85_is_blocked_path(ent->d_name)) continue;
         char full[300];
         snprintf(full, sizeof(full), "%s/%s", dir_path, ent->d_name);
         struct stat st;
@@ -329,7 +331,7 @@ static void browse_dir(const char *root) {
             k85_show_message(msg);
             while (true) {
                 k85_input_update();
-                if (k85_ab_held(500)) { k85_wait_ab_release(); break; }
+                if (k85_ui_cancel()) { k85_wait_ab_release(); break; }
                 vTaskDelay(pdMS_TO_TICKS(30));
             }
             return;
@@ -469,7 +471,7 @@ static void apply_theme_picker(void) {
         k85_show_message("No .thm files\nin /littlefs\nA+B=back");
         while (true) {
             k85_input_update();
-            if (k85_ab_held(500)) { k85_wait_ab_release(); break; }
+            if (k85_ui_cancel()) { k85_wait_ab_release(); break; }
             vTaskDelay(pdMS_TO_TICKS(30));
         }
         return;
@@ -491,7 +493,7 @@ static void apply_theme_picker(void) {
     k85_show_message(msg);
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); break; }
+        if (k85_ui_cancel()) { k85_wait_ab_release(); break; }
         vTaskDelay(pdMS_TO_TICKS(30));
     }
 }
@@ -518,7 +520,7 @@ static void apply_bios_theme_picker(void) {
         k85_show_message("No .thm files in\n/littlefs/bios\nA+B=back");
         while (true) {
             k85_input_update();
-            if (k85_ab_held(500)) { k85_wait_ab_release(); break; }
+            if (k85_ui_cancel()) { k85_wait_ab_release(); break; }
             vTaskDelay(pdMS_TO_TICKS(30));
         }
         return;
@@ -536,7 +538,7 @@ static void apply_bios_theme_picker(void) {
 
     if (!k85_copy_safe(src, K85_BIOS_THEME_ACTIVE_FILE)) {
         k85_show_message("Theme copy failed\nA+B=back");
-        while (true) { k85_input_update(); if (k85_ab_held(500)) { k85_wait_ab_release(); break; } vTaskDelay(pdMS_TO_TICKS(30)); }
+        while (true) { k85_input_update(); if (k85_ui_cancel()) { k85_wait_ab_release(); break; } vTaskDelay(pdMS_TO_TICKS(30)); }
         return;
     }
 
@@ -550,7 +552,7 @@ static void apply_bios_theme_picker(void) {
     k85_show_message(msg);
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); break; }
+        if (k85_ui_cancel()) { k85_wait_ab_release(); break; }
         vTaskDelay(pdMS_TO_TICKS(30));
     }
 }
@@ -577,7 +579,7 @@ static void apply_grub_theme_picker(void) {
         k85_show_message("No .thm files in\n/littlefs/grub\nA+B=back");
         while (true) {
             k85_input_update();
-            if (k85_ab_held(500)) { k85_wait_ab_release(); break; }
+            if (k85_ui_cancel()) { k85_wait_ab_release(); break; }
             vTaskDelay(pdMS_TO_TICKS(30));
         }
         return;
@@ -595,7 +597,7 @@ static void apply_grub_theme_picker(void) {
 
     if (!k85_copy_safe(src, K85_BOOT_THEME_ACTIVE_FILE)) {
         k85_show_message("Theme copy failed\nA+B=back");
-        while (true) { k85_input_update(); if (k85_ab_held(500)) { k85_wait_ab_release(); break; } vTaskDelay(pdMS_TO_TICKS(30)); }
+        while (true) { k85_input_update(); if (k85_ui_cancel()) { k85_wait_ab_release(); break; } vTaskDelay(pdMS_TO_TICKS(30)); }
         return;
     }
 
@@ -604,7 +606,7 @@ static void apply_grub_theme_picker(void) {
     k85_show_message(msg);
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); break; }
+        if (k85_ui_cancel()) { k85_wait_ab_release(); break; }
         vTaskDelay(pdMS_TO_TICKS(30));
     }
 }

@@ -1,4 +1,5 @@
 ﻿#include "snake.h"
+#include "core/control_motion.h"
 #include "config.h"
 #include "theme.h"
 #include "battery.h"
@@ -126,8 +127,8 @@ void k85_run_snake(void) {
             continue;
         }
 
-        float ax = 0, ay = 0, az = 0;
-        M5.Imu.getAccel(&ax, &ay, &az);
+        K85Vec motion; k85_control_vector(motion);
+        float ax=motion.x,ay=motion.y;
 
         if (fabsf(ax) > fabsf(ay)) {
             if (ax > 0.3f) { dir_x = 1; dir_y = 0; }

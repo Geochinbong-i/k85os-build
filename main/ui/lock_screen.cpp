@@ -419,7 +419,7 @@ void k85_lock_screen_loop(void) {
             k85_wait_ab_release();
             if (g_config.lock_enabled && g_config.lock_password[0]) {
                 char entered[32] = "";
-                bool submitted = k85_text_input("Enter password:", "", entered, sizeof(entered));
+                bool submitted = k85_text_input("Enter password:", "", entered, sizeof(entered), K85TextOptions{true,0,true});
 
                 if (submitted && k85_lock_verify_password(entered, g_config.lock_password)) {
                     s_particles_init = false;

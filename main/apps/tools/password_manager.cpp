@@ -25,13 +25,13 @@ static void wait_ab_exit(void) {
 // не отрезать себя от всех паролей опечаткой.
 static bool run_first_time_setup(void) {
     char pass1[64] = "";
-    if (!k85_text_input("Set master password:", "", pass1, sizeof(pass1)) || strlen(pass1) < 4) {
+    if (!k85_text_input("Set master password:", "", pass1, sizeof(pass1), K85TextOptions{true,0,true}) || strlen(pass1) < 4) {
         k85_show_message("Too short (min 4)\nA+B=back");
         wait_ab_exit();
         return false;
     }
     char pass2[64] = "";
-    if (!k85_text_input("Confirm master password:", "", pass2, sizeof(pass2))) return false;
+    if (!k85_text_input("Confirm master password:", "", pass2, sizeof(pass2), K85TextOptions{true,0,true})) return false;
 
     if (strcmp(pass1, pass2) != 0) {
         k85_show_message("Passwords don't match\nA+B=back");
@@ -49,7 +49,7 @@ static bool run_first_time_setup(void) {
 
 static bool run_unlock_prompt(void) {
     char pass[64] = "";
-    if (!k85_text_input("Master password:", "", pass, sizeof(pass))) return false;
+    if (!k85_text_input("Master password:", "", pass, sizeof(pass), K85TextOptions{true,0,true})) return false;
     if (!k85_pwmgr_unlock(pass)) {
         k85_show_message("Wrong password\nA+B=back");
         wait_ab_exit();
@@ -85,7 +85,7 @@ static void prompt_new_entry(void) {
     if (!k85_text_input("Username/email:", "", username, sizeof(username))) return;
 
     char password[64] = "";
-    if (!k85_text_input("Password:", "", password, sizeof(password)) || !password[0]) return;
+    if (!k85_text_input("Password:", "", password, sizeof(password), K85TextOptions{true,0,true}) || !password[0]) return;
 
     bool ok = k85_pwmgr_add(name, username, password);
     memset(password, 0, sizeof(password));

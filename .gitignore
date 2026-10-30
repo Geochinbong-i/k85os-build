@@ -35,3 +35,6 @@ voice.pak
 audit_report.txt
 
 *.*bak
+
+build-host/
+dist/

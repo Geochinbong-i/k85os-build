@@ -380,6 +380,7 @@ static void draw_boot_menu_dispatch(int selected, int seconds_left) {
 }
 
 static BootChoice run_boot_menu(void) {
+    k85_nav_reset();
     int selected = 0;
     bool interacted = false;
     int64_t start_us = esp_timer_get_time();
@@ -397,15 +398,15 @@ static BootChoice run_boot_menu(void) {
             last_seconds_shown = seconds_left;
         }
 
-        if (k85_btn_a_pressed()) {
+        auto event=k85_nav_take();
+        if (event==K85Nav::Next || event==K85Nav::Previous) {
             interacted = true;
-            selected = (selected + 1) % K85_BOOT_MENU_ITEM_COUNT;
+            selected = (selected + (event==K85Nav::Next?1:K85_BOOT_MENU_ITEM_COUNT-1)) % K85_BOOT_MENU_ITEM_COUNT;
             draw_boot_menu_dispatch(selected, 0);
             last_seconds_shown = 0;
         }
-        if (k85_btn_b_pressed()) {
-            return (BootChoice)selected;
-        }
+        if (event==K85Nav::Select) { k85_nav_reset(); return (BootChoice)selected; }
+        if (event==K85Nav::Back || event==K85Nav::EmergencyBack) { k85_nav_reset(); return BOOT_NORMAL; }
 
         if (!interacted && elapsed_ms >= K85_BOOT_MENU_TIMEOUT_MS) {
             return BOOT_NORMAL;

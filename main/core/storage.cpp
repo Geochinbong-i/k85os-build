@@ -14,7 +14,7 @@ bool mount() {
     esp_vfs_littlefs_conf_t conf = {};
     conf.base_path = kMountPoint;
     conf.partition_label = kPartitionLabel;
-    conf.format_if_mount_failed = true;
+    conf.format_if_mount_failed = false;
     conf.dont_mount = false;
 
     esp_err_t ret = esp_vfs_littlefs_register(&conf);

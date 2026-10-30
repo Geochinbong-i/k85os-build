@@ -82,7 +82,7 @@ static K85SetupResult step_wifi(void) {
         if (sidx < 0 || sidx == n) continue;
 
         char password[64] = "";
-        if (!k85_text_input("Enter password:", "", password, sizeof(password))) continue;
+        if (!k85_text_input("Enter password:", "", password, sizeof(password), K85TextOptions{true,63,true})) continue;
 
         k85_show_message("Connecting...");
         bool ok = k85_wifi_connect(ssids[sidx], password);

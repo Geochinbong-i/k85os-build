@@ -1,3 +1,4 @@
+#include "core/control_motion.h"
 ﻿#include "test_mode.h"
 #include "common.h"
 #include "input.h"
@@ -113,7 +114,7 @@ static void run_rotation_test(void) {
         if (k85_ab_held(500)) { k85_wait_ab_release(); return; }
         if (k85_btn_a_pressed()) {
             rot = (rot + 1) % 4;
-            M5.Display.setRotation(rot);
+            k85_display_rotation(rot);
         }
         if (k85_btn_b_pressed()) {
             return;

@@ -14,6 +14,13 @@
 #include "esp_random.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "esp_mac.h"
+#include "secret_store.h"
+#include "config_file_io.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include <cmath>
+#include <algorithm>
 
 static const char *TAG = "k85_cfg";
 
@@ -22,7 +29,7 @@ bool k85_fs_init(void) {
     esp_vfs_littlefs_conf_t conf = {
         .base_path = K85_LITTLEFS_BASE_PATH,
         .partition_label = K85_LITTLEFS_PART_LABEL,
-        .format_if_mount_failed = true,
+        .format_if_mount_failed = false,
         .dont_mount = false,
     };
     esp_err_t err = esp_vfs_littlefs_register(&conf);
@@ -55,6 +62,8 @@ void k85_config_defaults(k85_config_t *cfg) {
     cfg->brightness_active = 80;
     cfg->device_name_idx  = 0;
     cfg->rotation         = 1;
+    cfg->navigation_profile=0; cfg->imu_follow_rotation=true;
+    cfg->imu_sensitivity=1; cfg->imu_deadzone=1;
     cfg->bootstyle_idx    = 0;
     cfg->kb_layout        = 0;
     cfg->sound_volume     = 20;
@@ -117,133 +126,45 @@ void k85_config_defaults(k85_config_t *cfg) {
 // хранится в NVS (не в LittleFS, недостижима через cat/ls/веб-менеджер).
 // Без неё ключ AES был бы полностью выводим из MAC-адреса + публичной
 // строки в открытом исходном коде - то есть вычислим кем угодно.
-static void get_or_create_pepper(unsigned char pepper_out[16]) {
-    // ВАЖНО: k85_config_load() вызывается раньше k85_wifi_init(), где
-    // обычно и происходит nvs_flash_init() - значит на первом чтении
-    // конфига NVS может быть ещё не готов. nvs_flash_init() безопасно
-    // вызывать повторно (идемпотентно), поэтому гарантируем готовность
-    // NVS прямо здесь, а не полагаемся на порядок вызовов в app_main.
-    esp_err_t init_err = nvs_flash_init();
-    if (init_err == ESP_ERR_NVS_NO_FREE_PAGES || init_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase();
-        nvs_flash_init();
+// 키 생성 실패는 저장 실패다. NVS 전체 삭제나 0으로 채운 키로 진행하지 않는다.
+static bool get_aes_key(unsigned char key_out[16]) {
+    uint8_t mac[6]; if(esp_read_mac(mac,ESP_MAC_WIFI_STA)!=ESP_OK) return false;
+    if(nvs_flash_init()!=ESP_OK) return false;
+    nvs_handle_t h; if(nvs_open("k85_sec",NVS_READWRITE,&h)!=ESP_OK) return false;
+    unsigned char pepper[16]; size_t len=sizeof(pepper);
+    esp_err_t err=nvs_get_blob(h,"wifi_pepper",pepper,&len);
+    if(err==ESP_ERR_NVS_NOT_FOUND) {
+        esp_fill_random(pepper,sizeof(pepper));
+        err=nvs_set_blob(h,"wifi_pepper",pepper,sizeof(pepper));
+        if(err==ESP_OK) err=nvs_commit(h);
     }
-
-    nvs_handle_t h;
-    esp_err_t err = nvs_open("k85_sec", NVS_READWRITE, &h);
-    if (err != ESP_OK) { memset(pepper_out, 0, 16); return; }
-
-    size_t len = 16;
-    err = nvs_get_blob(h, "wifi_pepper", pepper_out, &len);
-    if (err != ESP_OK || len != 16) {
-        esp_fill_random(pepper_out, 16);
-        nvs_set_blob(h, "wifi_pepper", pepper_out, 16);
-        nvs_commit(h);
+    nvs_close(h); if(err!=ESP_OK || len!=16) return false;
+    const char salt[]="k85os-wifi-store-v1";
+    unsigned char input[6+sizeof(salt)+16],hash[32];
+    memcpy(input,mac,6); memcpy(input+6,salt,sizeof(salt)); memcpy(input+6+sizeof(salt),pepper,16);
+    int rc=mbedtls_sha256(input,sizeof(input),hash,0);
+    if(!rc) memcpy(key_out,hash,16);
+    memset(pepper,0,sizeof(pepper)); memset(input,0,sizeof(input)); memset(hash,0,sizeof(hash));
+    return rc==0;
+}
+static bool encrypt_to_hex(const char *plain,char *out,size_t size) {
+    if(!plain[0]) { if(!size) return false; out[0]=0; return true; }
+    unsigned char key[16],nonce[12]; if(!get_aes_key(key)) return false;
+    esp_fill_random(nonce,sizeof(nonce)); bool ok=k85secret::encrypt(plain,out,size,key,nonce);
+    memset(key,0,sizeof(key)); return ok;
+}
+static bool restore_secret(const char *encoded,char *out,size_t size) {
+    if(!out || !size) return false; out[0]=0;
+    if(!encoded) return false;
+    size_t n=strlen(encoded);
+    if(!n) return true;
+    if(strncmp(encoded,"gcm2:",5) && n<=63) {
+        // 명시 버전 접두사는 모르는 형식이면 평문으로 오인하지 않는다.
+        if(strchr(encoded,':') && !strncmp(encoded,"gcm",3)) return false;
+        if(n>=size) return false; memcpy(out,encoded,n+1); return true;
     }
-    nvs_close(h);
-}
-
-static void get_aes_key(unsigned char key_out[16]) {
-    uint8_t mac[6];
-    esp_wifi_get_mac(WIFI_IF_STA, mac);
-
-    unsigned char pepper[16];
-    get_or_create_pepper(pepper);
-
-    unsigned char hash[32];
-    char salt[] = "k85os-wifi-store-v1";
-    unsigned char input[6 + sizeof(salt) + 16];
-    memcpy(input, mac, 6);
-    memcpy(input + 6, salt, sizeof(salt));
-    memcpy(input + 6 + sizeof(salt), pepper, 16);
-    mbedtls_sha256(input, sizeof(input), hash, 0);
-    memcpy(key_out, hash, 16);
-}
-
-static void bytes_to_hex(const unsigned char *data, size_t len, char *out) {
-    for (size_t i = 0; i < len; i++) snprintf(out + i * 2, 3, "%02x", data[i]);
-}
-
-static bool hex_to_bytes(const char *hex, unsigned char *out, size_t out_max, size_t *out_len) {
-    size_t hlen = strlen(hex);
-    if (hlen % 2 != 0 || hlen / 2 > out_max) return false;
-    for (size_t i = 0; i < hlen / 2; i++) {
-        char byte_str[3] = { hex[i * 2], hex[i * 2 + 1], 0 };
-        out[i] = (unsigned char)strtoul(byte_str, nullptr, 16);
-    }
-    *out_len = hlen / 2;
-    return true;
-}
-
-// Шифрует plaintext (до 64 байт) -> hex-строка [16 байт IV][шифртекст] в out (нужно >= 224 байт)
-static void encrypt_to_hex(const char *plaintext, char *out, size_t out_size) {
-    if (!plaintext[0]) { out[0] = 0; return; }
-
-    unsigned char key[16];
-    get_aes_key(key);
-
-    unsigned char buf[80] = {0};
-    size_t plen = strlen(plaintext);
-    if (plen > 64) plen = 64;
-    memcpy(buf, plaintext, plen);
-
-    size_t padded_len = ((plen / 16) + 1) * 16;
-    unsigned char pad_val = (unsigned char)(padded_len - plen);
-    for (size_t i = plen; i < padded_len; i++) buf[i] = pad_val;
-
-    unsigned char iv[16];
-    esp_fill_random(iv, sizeof(iv)); // случайный IV на каждую строку — убирает детерминизм шифра
-
-    unsigned char iv_for_crypt[16];
-    memcpy(iv_for_crypt, iv, 16); // mbedtls портит iv в процессе, шлём копию
-
-    mbedtls_aes_context aes;
-    mbedtls_aes_init(&aes);
-    mbedtls_aes_setkey_enc(&aes, key, 128);
-    unsigned char cipher[80];
-    mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_ENCRYPT, padded_len, iv_for_crypt, buf, cipher);
-    mbedtls_aes_free(&aes);
-
-    bytes_to_hex(iv, 16, out);
-    bytes_to_hex(cipher, padded_len, out + 32);
-    out[32 + padded_len * 2] = 0;
-}
-
-// Дешифрует [16 байт IV][шифртекст] обратно в plaintext
-static void decrypt_from_hex(const char *hex, char *out, size_t out_size) {
-    out[0] = 0;
-    if (!hex || !hex[0]) return;
-
-    size_t hlen = strlen(hex);
-    if (hlen < 32) return; // старый формат без IV (до этого обновления) — пропускаем, пароль придётся ввести заново
-
-    unsigned char iv[16];
-    size_t iv_len = 0;
-    char iv_hex[33];
-    memcpy(iv_hex, hex, 32);
-    iv_hex[32] = 0;
-    if (!hex_to_bytes(iv_hex, iv, sizeof(iv), &iv_len) || iv_len != 16) return;
-
-    unsigned char cipher[80];
-    size_t clen = 0;
-    if (!hex_to_bytes(hex + 32, cipher, sizeof(cipher), &clen)) return;
-    if (clen == 0 || clen % 16 != 0) return;
-
-    unsigned char key[16];
-    get_aes_key(key);
-
-    mbedtls_aes_context aes;
-    mbedtls_aes_init(&aes);
-    mbedtls_aes_setkey_dec(&aes, key, 128);
-    unsigned char plain[80];
-    mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_DECRYPT, clen, iv, cipher, plain);
-    mbedtls_aes_free(&aes);
-
-    unsigned char pad_val = plain[clen - 1];
-    size_t plain_len = (pad_val <= 16 && pad_val <= clen) ? clen - pad_val : clen;
-    if (plain_len >= out_size) plain_len = out_size - 1;
-    memcpy(out, plain, plain_len);
-    out[plain_len] = 0;
+    unsigned char key[16]; if(!get_aes_key(key)) return false;
+    bool ok=k85secret::decrypt(encoded,out,size,key); memset(key,0,sizeof(key)); return ok;
 }
 static void set_str(char *dst, size_t dst_sz, const char *src) {
     if (src) snprintf(dst, dst_sz, "%s", src);
@@ -258,6 +179,16 @@ static cJSON *cfg_to_json(const k85_config_t *c) {
     cJSON_AddNumberToObject(root, "brightness_active", c->brightness_active);
     cJSON_AddNumberToObject(root, "device_name_idx", c->device_name_idx);
     cJSON_AddNumberToObject(root, "rotation", c->rotation);
+    cJSON_AddNumberToObject(root,"navigation_profile",c->navigation_profile);
+    cJSON_AddNumberToObject(root,"imu_sensitivity",c->imu_sensitivity);
+    cJSON_AddNumberToObject(root,"imu_deadzone",c->imu_deadzone);
+    cJSON_AddNumberToObject(root,"imu_neutral_x",c->imu_neutral_x);
+    cJSON_AddNumberToObject(root,"imu_neutral_y",c->imu_neutral_y);
+    cJSON_AddBoolToObject(root,"navigation_swap",c->navigation_swap);
+    cJSON_AddBoolToObject(root,"imu_follow_rotation",c->imu_follow_rotation);
+    cJSON_AddBoolToObject(root,"imu_swap_xy",c->imu_swap_xy);
+    cJSON_AddBoolToObject(root,"imu_invert_x",c->imu_invert_x);
+    cJSON_AddBoolToObject(root,"imu_invert_y",c->imu_invert_y);
     cJSON_AddNumberToObject(root, "bootstyle_idx", c->bootstyle_idx);
     cJSON_AddNumberToObject(root, "kb_layout", c->kb_layout);
     cJSON_AddNumberToObject(root, "kbd_nav_mode", c->kbd_nav_mode);
@@ -308,7 +239,7 @@ static cJSON *cfg_to_json(const k85_config_t *c) {
     cJSON *w = cJSON_CreateObject();
     cJSON_AddStringToObject(w, "ssid", c->wifi_ssid);
     char wifi_password_enc[192];
-    encrypt_to_hex(c->wifi_password, wifi_password_enc, sizeof(wifi_password_enc));
+    if(!encrypt_to_hex(c->wifi_password,wifi_password_enc,sizeof(wifi_password_enc))) { cJSON_Delete(w); cJSON_Delete(root); return nullptr; }
     cJSON_AddStringToObject(w, "password", wifi_password_enc);
     cJSON_AddBoolToObject(w, "saved", c->wifi_saved);
     cJSON_AddItemToObject(root, "wifi", w);
@@ -318,7 +249,7 @@ static cJSON *cfg_to_json(const k85_config_t *c) {
         cJSON *el = cJSON_CreateObject();
         cJSON_AddStringToObject(el, "ssid", c->wifi_networks[i].ssid);
         char net_pass_enc[192];
-        encrypt_to_hex(c->wifi_networks[i].password, net_pass_enc, sizeof(net_pass_enc));
+        if(!encrypt_to_hex(c->wifi_networks[i].password,net_pass_enc,sizeof(net_pass_enc))) { cJSON_Delete(el); cJSON_Delete(nets); cJSON_Delete(root); return nullptr; }
         cJSON_AddStringToObject(el, "password", net_pass_enc);
         cJSON_AddItemToArray(nets, el);
     }
@@ -369,7 +300,9 @@ static cJSON *cfg_to_json(const k85_config_t *c) {
     cJSON_AddStringToObject(root, "mqtt_broker_uri", c->mqtt_broker_uri);
     cJSON_AddStringToObject(root, "mqtt_client_id", c->mqtt_client_id);
     cJSON_AddStringToObject(root, "mqtt_username", c->mqtt_username);
-    cJSON_AddStringToObject(root, "mqtt_password", c->mqtt_password);
+    char mqtt_enc[192];
+    if(!encrypt_to_hex(c->mqtt_password,mqtt_enc,sizeof(mqtt_enc))) { cJSON_Delete(root); return nullptr; }
+    cJSON_AddStringToObject(root,"mqtt_password",mqtt_enc);
     cJSON_AddNumberToObject(root, "font_idx", c->font_idx);
 
     cJSON_AddBoolToObject(root, "ssh_enabled", c->ssh_enabled);
@@ -393,6 +326,16 @@ static void cfg_from_json(cJSON *root, k85_config_t *out) {
     GET_INT("brightness_active", brightness_active);
     GET_INT("device_name_idx", device_name_idx);
     GET_INT("rotation", rotation);
+    GET_INT("navigation_profile",navigation_profile);
+    GET_INT("imu_sensitivity",imu_sensitivity);
+    GET_INT("imu_deadzone",imu_deadzone);
+    { cJSON *x=cJSON_GetObjectItemCaseSensitive(root,"navigation_swap"); if(cJSON_IsBool(x)) out->navigation_swap=cJSON_IsTrue(x); }
+    { cJSON *x=cJSON_GetObjectItemCaseSensitive(root,"imu_follow_rotation"); if(cJSON_IsBool(x)) out->imu_follow_rotation=cJSON_IsTrue(x); }
+    { cJSON *x=cJSON_GetObjectItemCaseSensitive(root,"imu_swap_xy"); if(cJSON_IsBool(x)) out->imu_swap_xy=cJSON_IsTrue(x); }
+    { cJSON *x=cJSON_GetObjectItemCaseSensitive(root,"imu_invert_x"); if(cJSON_IsBool(x)) out->imu_invert_x=cJSON_IsTrue(x); }
+    { cJSON *x=cJSON_GetObjectItemCaseSensitive(root,"imu_invert_y"); if(cJSON_IsBool(x)) out->imu_invert_y=cJSON_IsTrue(x); }
+    { cJSON *x=cJSON_GetObjectItemCaseSensitive(root,"imu_neutral_x"); if(cJSON_IsNumber(x)) out->imu_neutral_x=x->valuedouble; }
+    { cJSON *x=cJSON_GetObjectItemCaseSensitive(root,"imu_neutral_y"); if(cJSON_IsNumber(x)) out->imu_neutral_y=x->valuedouble; }
     GET_INT("bootstyle_idx", bootstyle_idx);
     GET_INT("kb_layout", kb_layout);
     GET_INT("kbd_nav_mode", kbd_nav_mode);
@@ -451,9 +394,9 @@ static void cfg_from_json(cJSON *root, k85_config_t *out) {
         cJSON *ssid = cJSON_GetObjectItemCaseSensitive(w, "ssid");
         if (ssid && cJSON_IsString(ssid)) set_str(out->wifi_ssid, sizeof(out->wifi_ssid), ssid->valuestring);
         cJSON *pass = cJSON_GetObjectItemCaseSensitive(w, "password");
-        if (pass && cJSON_IsString(pass)) set_str(out->wifi_password, sizeof(out->wifi_password), pass->valuestring);
+        bool pass_ok=cJSON_IsString(pass) && restore_secret(pass->valuestring,out->wifi_password,sizeof(out->wifi_password));
         cJSON *saved = cJSON_GetObjectItemCaseSensitive(w, "saved");
-        if (saved) out->wifi_saved = cJSON_IsTrue(saved);
+        if (saved) out->wifi_saved = cJSON_IsTrue(saved) && pass_ok;
     }
 
     cJSON *nets = cJSON_GetObjectItemCaseSensitive(root, "wifi_networks");
@@ -468,7 +411,7 @@ static void cfg_from_json(cJSON *root, k85_config_t *out) {
             k85_wifi_net_t *net = &out->wifi_networks[out->wifi_networks_count];
             set_str(net->ssid, sizeof(net->ssid), s->valuestring);
             cJSON *p = cJSON_GetObjectItemCaseSensitive(el, "password");
-            set_str(net->password, sizeof(net->password), (p && cJSON_IsString(p)) ? p->valuestring : "");
+            if(!cJSON_IsString(p) || !restore_secret(p->valuestring,net->password,sizeof(net->password))) continue;
             out->wifi_networks_count++;
         }
     }
@@ -507,6 +450,8 @@ static void cfg_from_json(cJSON *root, k85_config_t *out) {
                 if (sc && cJSON_IsString(sc)) snprintf(out->totp_entries[i].secret_base32, sizeof(out->totp_entries[i].secret_base32), "%s", sc->valuestring);
             }
             out->totp_entries_count = n;
+        }
+    }
     {
         cJSON *_pw = cJSON_GetObjectItemCaseSensitive(root, "pwmgr_master_verifier");
         if (_pw && cJSON_IsString(_pw)) snprintf(out->pwmgr_master_verifier, sizeof(out->pwmgr_master_verifier), "%s", _pw->valuestring);
@@ -544,15 +489,13 @@ static void cfg_from_json(cJSON *root, k85_config_t *out) {
                 if (ctl && cJSON_IsNumber(ctl)) out->pw_entries[i].ciphertext_len = ctl->valueint;
             }
             out->pw_entries_count = n;
+        }
+    }
     { cJSON *_m = cJSON_GetObjectItemCaseSensitive(root, "mqtt_broker_uri"); if (_m && cJSON_IsString(_m)) snprintf(out->mqtt_broker_uri, sizeof(out->mqtt_broker_uri), "%s", _m->valuestring); }
     { cJSON *_m = cJSON_GetObjectItemCaseSensitive(root, "mqtt_client_id"); if (_m && cJSON_IsString(_m)) snprintf(out->mqtt_client_id, sizeof(out->mqtt_client_id), "%s", _m->valuestring); }
     { cJSON *_m = cJSON_GetObjectItemCaseSensitive(root, "mqtt_username"); if (_m && cJSON_IsString(_m)) snprintf(out->mqtt_username, sizeof(out->mqtt_username), "%s", _m->valuestring); }
-    { cJSON *_m = cJSON_GetObjectItemCaseSensitive(root, "mqtt_password"); if (_m && cJSON_IsString(_m)) snprintf(out->mqtt_password, sizeof(out->mqtt_password), "%s", _m->valuestring); }
+    { cJSON *_m = cJSON_GetObjectItemCaseSensitive(root, "mqtt_password"); if (_m && cJSON_IsString(_m)) restore_secret(_m->valuestring,out->mqtt_password,sizeof(out->mqtt_password)); }
     { cJSON *_f = cJSON_GetObjectItemCaseSensitive(root, "font_idx"); if (_f) out->font_idx = _f->valueint; }
-        }
-    }
-        }
-    }
 
     { cJSON *x = cJSON_GetObjectItemCaseSensitive(root, "ssh_enabled"); if (x) out->ssh_enabled = cJSON_IsTrue(x); }
     { cJSON *x = cJSON_GetObjectItemCaseSensitive(root, "ssh_username"); if (x && cJSON_IsString(x)) set_str(out->ssh_username, sizeof(out->ssh_username), x->valuestring); }
@@ -583,56 +526,141 @@ static void deep_merge(cJSON *dst, const cJSON *src) {
 }
 
 // ============================ load / save ============================
+// 튜닝: 설정 파일 최대 256KiB. 비정상 파일로 메모리를 고갈시키지 않는다.
+static constexpr long CONFIG_MAX_BYTES=256*1024;
+static cJSON *s_retained=nullptr;
+static uint64_t s_generation=0;
+static bool s_has_digest=false;
+static unsigned char s_digest[32]={};
+static bool s_main_is_latest=false;
+static SemaphoreHandle_t config_mutex() { static SemaphoreHandle_t m=xSemaphoreCreateMutex(); return m; }
+struct ConfigGuard {
+    bool ok; ConfigGuard():ok(config_mutex() && xSemaphoreTake(config_mutex(),portMAX_DELAY)==pdTRUE) {}
+    ~ConfigGuard() { if(ok) xSemaphoreGive(config_mutex()); }
+};
+static void memory_digest(const k85_config_t *cfg,unsigned char out[32]) {
+    mbedtls_sha256(reinterpret_cast<const unsigned char*>(cfg),sizeof(*cfg),out,0);
+}
+// 원리: checksum 필드를 제외한 JSON을 직렬화해 손상 여부를 검사한다(인증용은 아니다).
+static bool checksum(cJSON *root,char out[65]) {
+    char *txt=cJSON_PrintUnformatted(root); if(!txt) return false;
+    unsigned char hash[32]; int err=mbedtls_sha256(reinterpret_cast<unsigned char*>(txt),strlen(txt),hash,0);
+    cJSON_free(txt); if(err) return false; k85secret::hex(hash,32,out); return true;
+}
+static cJSON *read_record(const char *path,uint64_t &generation) {
+    FILE *f=fopen(path,"rb"); if(!f) return nullptr;
+    if(fseek(f,0,SEEK_END)!=0) { fclose(f); return nullptr; }
+    long size=ftell(f);
+    if(size<=0 || size>CONFIG_MAX_BYTES || fseek(f,0,SEEK_SET)!=0) { fclose(f); return nullptr; }
+    char *buf=static_cast<char*>(malloc(size+1)); if(!buf) { fclose(f); return nullptr; }
+    size_t n=fread(buf,1,size,f); bool ok=!ferror(f) && n==size;
+    ok=(fclose(f)==0) && ok; buf[n]=0;
+    cJSON *root=ok?cJSON_ParseWithOpts(buf,nullptr,true):nullptr; free(buf);
+    if(!cJSON_IsObject(root)) { cJSON_Delete(root); return nullptr; }
+    auto schema=cJSON_GetObjectItemCaseSensitive(root,"config_schema");
+    auto gen=cJSON_GetObjectItemCaseSensitive(root,"_generation");
+    auto sum=cJSON_DetachItemFromObjectCaseSensitive(root,"_checksum");
+    if(!schema && !gen && !sum) { generation=0; return root; }
+    char actual[65];
+    ok=cJSON_IsNumber(schema) && schema->valueint==2 && cJSON_IsNumber(gen) &&
+       std::isfinite(gen->valuedouble) && gen->valuedouble>=1 && gen->valuedouble<9007199254740991.0 &&
+       floor(gen->valuedouble)==gen->valuedouble && cJSON_IsString(sum) && strlen(sum->valuestring)==64 &&
+       checksum(root,actual) && strcmp(actual,sum->valuestring)==0;
+    if(sum) cJSON_AddItemToObject(root,"_checksum",sum);
+    if(!ok) { cJSON_Delete(root); return nullptr; }
+    generation=static_cast<uint64_t>(gen->valuedouble); return root;
+}
+static void validate_config(k85_config_t &cfg) {
+    auto range=[](int &v,int min,int max,int fallback) { if(v<min||v>max) v=fallback; };
+    range(cfg.rotation,0,3,1); range(cfg.navigation_profile,0,1,0);
+    range(cfg.imu_sensitivity,0,2,1); range(cfg.imu_deadzone,0,2,1);
+    range(cfg.brightness_active,0,100,80); range(cfg.bootstyle_idx,0,2,0);
+    range(cfg.device_name_idx,0,9,0); range(cfg.boot_loader_style,0,3,0); range(cfg.sound_volume,0,100,20);
+    range(cfg.cursor_mode,0,3,0); range(cfg.kbd_nav_mode,0,1,0);
+    range(cfg.menu_ui_style,0,2,0); range(cfg.bios_ui_style,0,2,0);
+    range(cfg.battery_mode_idx,0,2,1); range(cfg.font_idx,0,4,0);
+    range(cfg.active_profile_idx,0,K85_MAX_PROFILES-1,0);
+    range(cfg.wifi_networks_count,0,K85_MAX_WIFI_NETWORKS,0);
+    range(cfg.pw_entries_count,0,K85_MAX_PW_ENTRIES,0); range(cfg.totp_entries_count,0,K85_MAX_TOTP_ENTRIES,0);
+    for(int i=0;i<K85_MAX_PW_ENTRIES;i++) range(cfg.pw_entries[i].ciphertext_len,0,80,0);
+    if(!std::isfinite(cfg.imu_neutral_x)||fabsf(cfg.imu_neutral_x)>2) cfg.imu_neutral_x=0;
+    if(!std::isfinite(cfg.imu_neutral_y)||fabsf(cfg.imu_neutral_y)>2) cfg.imu_neutral_y=0;
+}
 bool k85_config_load(void) {
-    k85_config_defaults(&g_config);
-
-    FILE *f = fopen(CONFIG_FILE_PATH, "r");
-    if (!f) {
-        ESP_LOGW(TAG, "Config file not found, using defaults");
-        return false;
+    ConfigGuard lock; if(!lock.ok) return false;
+    const char *paths[]={CONFIG_FILE_PATH,CONFIG_FILE_PATH ".tmp",CONFIG_FILE_PATH ".bak"};
+    cJSON *best=nullptr; uint64_t highest=0; int chosen=-1;
+    for(int i=0;i<3;i++) {
+        uint64_t generation=0; auto candidate=read_record(paths[i],generation);
+        if(candidate && (!best || generation>highest)) {
+            cJSON_Delete(best); best=candidate; highest=generation; chosen=i;
+        } else cJSON_Delete(candidate);
     }
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char *buf = (char *)malloc((size_t)sz + 1);
-    if (!buf) { fclose(f); return false; }
-    size_t rd = fread(buf, 1, (size_t)sz, f);
-    buf[rd] = '\0';
-    fclose(f);
-
-    cJSON *root = cJSON_Parse(buf);
-    free(buf);
-    if (!root) {
-        ESP_LOGE(TAG, "JSON parse error");
-        return false;
-    }
-
-    cJSON *defaults = cfg_to_json(&g_config);
-    if (defaults) {
-        deep_merge(root, defaults);
-        cJSON_Delete(defaults);
-    }
-    cfg_from_json(root, &g_config);
-    cJSON_Delete(root);
+    k85_config_defaults(&g_config); s_has_digest=false;
+    cJSON_Delete(s_retained); s_retained=nullptr; s_generation=0; s_main_is_latest=false;
+    if(!best) { ESP_LOGW(TAG,"No valid config; files retained for recovery"); return false; }
+    cfg_from_json(best,&g_config); validate_config(g_config);
+    s_retained=best; s_generation=highest; s_main_is_latest=chosen==0;
+    memory_digest(&g_config,s_digest); s_has_digest=true;
     return true;
 }
-
-bool k85_config_save(void) {
-    cJSON *root = cfg_to_json(&g_config);
-    if (!root) return false;
-    char *txt = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-    if (!txt) return false;
-
-    FILE *f = fopen(CONFIG_FILE_PATH, "w");
-    bool ok = false;
-    if (f) {
-        ok = fputs(txt, f) >= 0;
-        fclose(f);
+static bool config_save_locked() {
+    // 정상 설정의 변경이 없으면 재암호화/flash 쓰기를 생략한다.
+    validate_config(g_config);
+    unsigned char current[32]; memory_digest(&g_config,current);
+    if(s_has_digest && memcmp(current,s_digest,32)==0) return true;
+    auto snapshot=static_cast<k85_config_t*>(malloc(sizeof(k85_config_t)));
+    if(!snapshot) return false; memcpy(snapshot,&g_config,sizeof(*snapshot)); validate_config(*snapshot);
+    cJSON *root=cfg_to_json(snapshot); memory_digest(snapshot,current); memset(snapshot,0,sizeof(*snapshot)); free(snapshot);
+    if(!root) return false;
+    if(s_retained) deep_merge(root,s_retained);
+    cJSON_DeleteItemFromObjectCaseSensitive(root,"_checksum");
+    cJSON_DeleteItemFromObjectCaseSensitive(root,"_generation");
+    cJSON_DeleteItemFromObjectCaseSensitive(root,"config_schema");
+    if(s_generation>=9007199254740990ULL) { cJSON_Delete(root); return false; }
+    cJSON_AddNumberToObject(root,"config_schema",2);
+    cJSON_AddNumberToObject(root,"_generation",double(s_generation+1));
+    char sum[65]; if(!checksum(root,sum)) { cJSON_Delete(root); return false; }
+    cJSON_AddStringToObject(root,"_checksum",sum);
+    char *txt=cJSON_PrintUnformatted(root); if(!txt) { cJSON_Delete(root); return false; }
+    auto &io=k85_config_io(); FILE *f=fopen(CONFIG_FILE_PATH ".tmp","wb"); bool ok=false;
+    if(f) {
+        size_t len=strlen(txt); ok=io.write(txt,1,len,f)==len;
+        if(io.flush(f)!=0) ok=false;
+        if(io.sync(fileno(f))!=0) ok=false;
+        if(io.close(f)!=0) ok=false;
     }
     cJSON_free(txt);
-    return ok;
+    uint64_t generation=0; auto checked=ok?read_record(CONFIG_FILE_PATH ".tmp",generation):nullptr;
+    ok=checked && generation==s_generation+1; cJSON_Delete(checked);
+    // 오류가 난 임시본은 복구 후보로 선택되지 않도록 무효화한다. 정상본/백업은 건드리지 않는다.
+    if(!ok) { remove(CONFIG_FILE_PATH ".tmp"); cJSON_Delete(root); return false; }
+    if(s_main_is_latest && io.rename(CONFIG_FILE_PATH,CONFIG_FILE_PATH ".bak")!=0) {
+        remove(CONFIG_FILE_PATH ".tmp"); cJSON_Delete(root); return false;
+    }
+    if(s_main_is_latest) s_main_is_latest=false;
+    if(io.rename(CONFIG_FILE_PATH ".tmp",CONFIG_FILE_PATH)!=0) {
+        remove(CONFIG_FILE_PATH ".tmp"); cJSON_Delete(root); return false;
+    }
+    cJSON_Delete(s_retained); s_retained=root; ++s_generation; s_main_is_latest=true;
+    memcpy(s_digest,current,32); s_has_digest=true; return true;
 }
+bool k85_config_save(void) {
+    ConfigGuard lock; return lock.ok && config_save_locked();
+}
+bool k85_config_restore_file(const char *path) {
+    ConfigGuard lock; if(!lock.ok) return false;
+    uint64_t ignored=0; cJSON *restored=read_record(path,ignored); if(!restored) return false;
+    auto old=static_cast<k85_config_t*>(malloc(sizeof(g_config))); if(!old) { cJSON_Delete(restored); return false; }
+    memcpy(old,&g_config,sizeof(g_config)); cJSON *old_root=s_retained; bool old_digest=s_has_digest;
+    k85_config_defaults(&g_config); cfg_from_json(restored,&g_config); validate_config(g_config);
+    s_retained=restored; s_has_digest=false;
+    bool ok=config_save_locked();
+    if(ok) cJSON_Delete(old_root);
+    else { cJSON_Delete(s_retained); s_retained=old_root; s_has_digest=old_digest; memcpy(&g_config,old,sizeof(g_config)); }
+    memset(old,0,sizeof(g_config)); free(old); return ok;
+}
+// 용어: 세대=generation, checksum=우발 손상 검사값, 임시본/백업본=중단 후 정상값 복구 후보.
 
 // ============================ high scores ============================
 int k85_get_high_score(const char *game) {

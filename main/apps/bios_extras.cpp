@@ -32,14 +32,14 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define K85_CFG_BACKUP     "/littlefs/k85os_config.json.bak"
-#define K85_CFG_BACKUP_TMP "/littlefs/k85os_config.json.bak.tmp"
+#define K85_CFG_BACKUP     "/littlefs/k85os_config.json.manual.bak"
+#define K85_CFG_BACKUP_TMP "/littlefs/k85os_config.json.manual.bak.tmp"
 #define K85_CFG_RESTORE_TMP "/littlefs/k85os_config.json.tmp"
 
 static void wait_ab_exit(void) {
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); return; }
+        if (k85_ui_cancel()) { k85_wait_ab_release(); return; }
         vTaskDelay(pdMS_TO_TICKS(30));
     }
 }
@@ -50,16 +50,8 @@ static void show_and_wait(const char *msg) {
 }
 
 static bool confirm_action(const char *label) {
-    char msg[96];
-    snprintf(msg, sizeof(msg), "%s?\nB=confirm A+B=cancel", label);
-    k85_show_message(msg);
-    k85_wait_ab_release();
-    while (true) {
-        k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); return false; }
-        if (k85_btn_b_pressed()) return true;
-        vTaskDelay(pdMS_TO_TICKS(30));
-    }
+    const char *items[]={"Confirm","Back"};
+    return k85_run_list_menu(label,items,2,nullptr)==0;
 }
 
 // ---------- Hardware monitor ----------
@@ -94,7 +86,7 @@ static void hardware_monitor(void) {
     int64_t last = 0;
     while (true) {
         k85_input_update();
-        if (k85_ab_held(500)) { k85_wait_ab_release(); break; }
+        if (k85_ui_cancel()) { k85_wait_ab_release(); break; }
 
         int64_t now = esp_timer_get_time();
         if (last == 0 || now - last >= 1000000) {
@@ -214,7 +206,7 @@ static bool copy_file(const char *src, const char *dst_tmp, const char *dst) {
 }
 
 static void backup_config(void) {
-    k85_config_save();   // make sure the file is current
+    if(!k85_config_save()) { show_and_wait("Save failed; no backup made"); return; }
     bool ok = copy_file(CONFIG_FILE_PATH, K85_CFG_BACKUP_TMP, K85_CFG_BACKUP);
     show_and_wait(ok ? "Config backed up\n(stays on device)\nA+B=back" : "Backup failed\nA+B=back");
 }
@@ -226,7 +218,7 @@ static void restore_config(void) {
         return;
     }
     if (!confirm_action("Restore config backup")) return;
-    if (!copy_file(K85_CFG_BACKUP, K85_CFG_RESTORE_TMP, CONFIG_FILE_PATH)) {
+    if (!k85_config_restore_file(K85_CFG_BACKUP)) {
         show_and_wait("Restore failed\nA+B=back");
         return;
     }

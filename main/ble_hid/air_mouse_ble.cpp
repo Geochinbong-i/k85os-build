@@ -96,10 +96,7 @@ static bool k85_hid_stack_init(void) {
     if (s_hid_inited) return true;
 
     esp_err_t nvs_ret = nvs_flash_init();
-    if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase();
-        nvs_flash_init();
-    }
+    if(nvs_ret!=ESP_OK) return false; // 보존: NVS 자동 삭제 금지
 
     if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE) {
         // Освобождаем память под Classic BT — используется только BLE,

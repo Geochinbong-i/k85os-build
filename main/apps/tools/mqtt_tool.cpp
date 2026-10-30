@@ -42,7 +42,7 @@ static bool run_broker_setup(void) {
 
     char password[64] = "";
     if (username[0]) {
-        k85_text_input("Password:", "", password, sizeof(password));
+        k85_text_input("Password:", "", password, sizeof(password), K85TextOptions{true,0,true});
     }
 
     snprintf(g_config.mqtt_broker_uri, sizeof(g_config.mqtt_broker_uri), "%s", uri);

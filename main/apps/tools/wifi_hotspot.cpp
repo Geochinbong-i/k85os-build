@@ -951,7 +951,7 @@ static bool choose_ap_password(char *out_password, size_t out_size) {
     }
 
     char pass[32] = "";
-    if (!k85_text_input("Set hotspot password\n(min 8 chars):", "", pass, sizeof(pass))) return false;
+    if (!k85_text_input("Set hotspot password\n(min 8 chars):", "", pass, sizeof(pass), K85TextOptions{true,0,true})) return false;
     if (strlen(pass) < 8) {
         k85_show_message("Too short (min 8)\nA+B=back");
         vTaskDelay(pdMS_TO_TICKS(1500));
