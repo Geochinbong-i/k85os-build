@@ -23,7 +23,8 @@ bool k85_control_vector(K85Vec &out) {
     }
     int64_t now=esp_timer_get_time();
     float dt=s_last?k85_safe_dt(float(now-s_last)/1000000):0.03f; s_last=now;
-    int quarter=g_config.imu_follow_rotation ? ((g_config.rotation+3)&3):0;
+    // IR 등 앱의 임시 회전도 실제 표시 방향을 따른다. 저장 설정은 바꾸지 않는다.
+    int quarter=g_config.imu_follow_rotation ? ((int(M5.Display.getRotation())+3)&3):0;
     K85Vec v=k85_imu_transform(-ax-g_config.imu_neutral_x,ay-g_config.imu_neutral_y,quarter,
         g_config.imu_swap_xy,g_config.imu_invert_x,g_config.imu_invert_y);
     const float dead[]={0.04f,0.09f,0.16f},gain[]={0.6f,1.0f,1.6f};
