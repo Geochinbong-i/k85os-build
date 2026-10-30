@@ -19,6 +19,7 @@ void k85_nav_reset() {}
 const char *k85_nav_hint() {return "A:select B:next";}
 bool k85_ab_held(uint32_t) {return false;} void k85_wait_ab_release() {}
 bool k85_control_vector(K85Vec &out) {out={0,0};return false;}
+void k85_control_motion_reset() {}
 static void next(int count) {for(int i=0;i<count;i++) gestures.push_back(K85Nav::Next);}
 static void select() {gestures.push_back(K85Nav::Select);}
 static void all_ascii() {
@@ -54,6 +55,7 @@ int main() {
     for(int rotation=0;rotation<4;rotation++) {
         M5.Display.w=(rotation&1)?240:135;M5.Display.h=(rotation&1)?135:240;
         all_ascii();M5.Display.trace.clear();cancel_and_limits();M5.Display.trace.clear();
+        g_config.kbd_nav_mode=1;all_ascii();g_config.kbd_nav_mode=0;M5.Display.trace.clear();
     }
     std::cout<<"UI: production keyboard entered all 95 ASCII bytes using buttons, cancel/output invariance, secret masking, full/initial limits, multiline; 4 rotations with geometry checks passed\n";
 }

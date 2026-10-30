@@ -298,21 +298,23 @@ static void draw(void) {
 void k85_run_status_bar_settings(void) {
     s_selected = 0;
     s_scroll_top = 0;
+    k85_nav_reset();
     draw();
 
     while (true) {
         k85_input_update();
 
-        if (k85_ab_held(500)) {
+        if (k85_ui_cancel()) {
             k85_wait_ab_release();
             k85_config_save();
             return;
         }
-        if (k85_btn_a_pressed()) {
-            s_selected = (s_selected + 1) % K85_SB_ITEM_COUNT;
+        auto event=k85_nav_take();
+        if (event==K85Nav::Next || event==K85Nav::Previous) {
+            s_selected = (s_selected + (event==K85Nav::Next?1:K85_SB_ITEM_COUNT-1)) % K85_SB_ITEM_COUNT;
             draw();
         }
-        if (k85_btn_b_pressed() && !k85_btn_a_is_down()) {
+        if (event==K85Nav::Select) {
             uint32_t bit = k85_sb_items[s_selected].bit;
             if (bit != 0) {
                 g_config.sb_flags ^= bit;

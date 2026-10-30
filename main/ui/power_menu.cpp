@@ -45,16 +45,8 @@ static void draw_power_icon(int cx, int cy, int r, const char *name, uint32_t co
 // Простое да/нет подтверждение для необратимых действий (Power Off/Reboot),
 // в том же стиле, что confirm-диалоги в settings_menu.cpp (SSH disable и т.п.).
 static bool confirm_action(const char *message) {
-    k85_show_message(message);
-    while (true) {
-        k85_input_update();
-        if (k85_ab_held(500)) {
-            k85_wait_ab_release();
-            return false;
-        }
-        if (k85_btn_b_pressed()) return true;
-        vTaskDelay(pdMS_TO_TICKS(30));
-    }
+    const char *items[]={"Confirm","Back"};
+    return k85_run_list_menu(message,items,2,nullptr)==0;
 }
 
 void k85_run_power_menu(void) {
@@ -77,11 +69,11 @@ void k85_run_power_menu(void) {
             g_config.sleep_wake_mode = (wake_mode + 1) % 3;
             k85_config_save();
         } else if (idx == 2) {
-            if (confirm_action("Power off device?\nB=confirm A+B=cancel")) {
+            if (confirm_action("Power off device?")) {
                 k85_power_off(); // не возвращается
             }
         } else if (idx == 3) {
-            if (confirm_action("Reboot device?\nB=confirm A+B=cancel")) {
+            if (confirm_action("Reboot device?")) {
                 k85_power_reboot(); // не возвращается
             }
         }

@@ -30,6 +30,7 @@ static bool edit(const char *prompt,const char *initial,char *out,size_t size,
     int64_t last_step=0;
     const char *error="";
     k85_nav_reset();
+    k85_control_motion_reset();
     // 원리: 현재 페이지 문자와 명시 제어 키를 한 목록으로 연결해 빈 칸을 건너뛴다.
     while (true) {
         const int chars=std::strlen(k85edit::pages[page]);
@@ -69,6 +70,7 @@ static bool edit(const char *prompt,const char *initial,char *out,size_t size,
         }
         if (g_config.kbd_nav_mode==1) {
             K85Vec v; bool ok=k85_control_vector(v);
+            if(!ok && std::strcmp(error,"TILT")) { error="TILT"; dirty=true; }
             if (ok) {
                 int64_t now=esp_timer_get_time()/1000;
                 float magnitude=std::fmax(std::fabs(v.x),std::fabs(v.y));

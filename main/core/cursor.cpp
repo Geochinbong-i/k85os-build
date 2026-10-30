@@ -21,6 +21,7 @@ void k85_cursor_reset(void) {
     s_cy = (float)(M5.Display.height() / 2);
     s_inited = true;
     s_last_us=0;
+    k85_control_motion_reset();
 }
 
 void k85_cursor_update(void) {
