@@ -46,6 +46,11 @@ manifest = {
     'app_offset':flash['app']['offset'],'app_size':app.stat().st_size,'slot_bytes':int(slot[4].strip(),0),
     'tests':'see matching GitHub Actions host-checks job',
     'device_test':'NOT RUN; no flashing performed',
+    'installation':{
+        'full_image_overwrites_nvs':True,
+        'full_image_note':'Contiguous raw merged BIN includes erased padding over NVS; not a data-preserving default',
+        'preferred_upgrade':'App-only after verifying existing partition layout and actual running/boot slot',
+    },
     'files':{p.name:sha(p) for p in sorted(OUT.iterdir()) if p.is_file() and p.name not in ('SHA256SUMS.txt','build-manifest.json')}
 }
 (OUT/'build-manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n')

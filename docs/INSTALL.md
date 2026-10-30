@@ -8,6 +8,10 @@
 - `k85OS-custom-app.bin`: 앱 단독 파일. 시작 주소는 같은 산출물의 flasher_args.json/build-manifest.json의 app_offset을 사용한다. 0x0에 쓰면 안 된다.
 - `SHA256SUMS.txt`와 `build-manifest.json`: 파일 해시와 실제 소스 SHA·IDF·파티션 조건.
 
+**데이터 보존 설치에는 통합 BIN을 기본으로 쓰지 않는다.** 통합 BIN은 파일 사이의 빈 주소도 0xFF로 채워 하나의 연속 구간으로 쓴다. 현재 배치에서 그 구간에는 NVS(0x9000~0xEFFF)가 포함된다. 통합 BIN을 0x0에 쓰면 LittleFS 파일이 남더라도 NVS의 암호화 키 재료가 지워져 기존 Wi-Fi/MQTT 비밀을 해독하지 못할 수 있다. 현재 기기의 전체 백업 및 실행 중인 앱 슬롯·파티션을 먼저 확인하고, 동일한 K85 배치에서는 해당 슬롯의 앱만 교체하는 방식을 우선한다. 이 산출물의 app_offset은 기본 ota_0 주소이므로 현재 기기의 부팅 슬롯과 동일한지 별도로 확인한다.
+
+근거(2026-10-31 확인): [Espressif esptool 공식 문서의 merge-bin/섹터 지우기 설명](https://docs.espressif.com/projects/esptool/en/latest/esp32s3/esptool/basic-commands.html). 사용자 보유 원본 통합 이미지의 해당 NVS 구간 24,576바이트도 모두 0xFF임을 확인했다.
+
 ## 쓰기 전 확인
 
 1. 정확한 USB 포트와 ESP32-S3 기기를 확인한다. 전원·USB 다운로드 모드·복구 진입은 제조사 절차로 확인한다.
@@ -18,7 +22,7 @@
 
 ## 설치와 검증
 
-해시와 파일 종류를 확인한 뒤 사용자 승인 범위의 쓰기만 실행한다. esptool 5 예시: 통합 이미지일 때 `python -m esptool --chip esp32s3 --port COM번호 write-flash 0x0 k85OS-custom-full.bin`. **앱 설치는 manifest의 실제 app_offset을 사용한다.** 명령 성공은 물리 기능 확인과 다르다.
+해시·파일 종류·덮어쓰는 주소 범위를 확인한 뒤 사용자 승인 범위의 쓰기만 실행한다. **통합 설치의 NVS 손실 범위를 승인한 경우에만** esptool 5 예시 `python -m esptool --chip esp32s3 --port COM번호 write-flash 0x0 k85OS-custom-full.bin`을 사용한다. 앱 설치는 manifest의 app_offset과 현재 기기의 실제 실행 슬롯을 대조한 주소를 사용한다. 명령 성공은 물리 기능 확인과 다르다.
 
 가상 시험 암호 `Sugar!2026` 등을 쓰는 시험 AP로 연결→저장→전원 재연결을 확인한다. 버튼·4방향·IMU·설정 보존·게임·음향·IR은 VALIDATION.md의 실물 항목대로 확인한다. 실제 암호를 UART·로그에 남기지 않는다.
 
