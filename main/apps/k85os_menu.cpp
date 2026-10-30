@@ -382,20 +382,21 @@ static void run_customization_menu(void) {
         }
         M5.Display.setTextColor((uint32_t)0xAAAAAA, bg);
         M5.Display.setCursor(4, y + 4);
-        M5.Display.print("A=next B=select A+B=exit");
+        M5.Display.print(k85_nav_hint());
     };
 
     draw();
     while (true) {
         k85_input_update();
         if (k85_ui_cancel()) { k85_wait_ab_release(); return; }
-        if (k85_btn_a_pressed()) {
-            selected = (selected + 1) % CUST_COUNT;
+        auto event=k85_nav_take();
+        if (event==K85Nav::Next || event==K85Nav::Previous) {
+            selected = (selected + (event==K85Nav::Next?1:CUST_COUNT-1)) % CUST_COUNT;
             k85_voice_say(labeled[selected]);
             draw();
         }
-        if (k85_nav_is(K85Nav::Select)) {
-            if (selected == 5) { return; }
+        if (event==K85Nav::Select) {
+            if (selected == 5) { k85_nav_reset(); return; }
             if (selected == 4) {
                 g_config.bios_ui_style = (g_config.bios_ui_style + 1) % 3;
                 k85_config_save();

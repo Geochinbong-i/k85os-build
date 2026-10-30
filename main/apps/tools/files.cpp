@@ -115,13 +115,16 @@ static void read_file_view(const char *full_path, const char *name, long size) {
         if (truncated && page == page_count - 1) {
             M5.Display.print("A=next A+B=back (truncated)");
         } else {
-            M5.Display.print("A=next page  A+B=back");
+            M5.Display.print(k85_nav_hint());
         }
 
         while (true) {
             k85_input_update();
             if (k85_ui_cancel()) { k85_wait_ab_release(); return; }
-            if (k85_btn_a_pressed()) { page = (page + 1) % page_count; break; }
+            auto event=k85_nav_take();
+            if(event==K85Nav::Next || event==K85Nav::Previous) {
+                page=(page+(event==K85Nav::Next?1:page_count-1))%page_count; break;
+            }
             vTaskDelay(pdMS_TO_TICKS(30));
         }
     }

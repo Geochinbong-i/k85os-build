@@ -302,7 +302,7 @@ int k85_run_list_menu(const char *title, const char *const items[], int count,
         k85_nav_reset(); k85_cursor_reset();
         while (true) {
             int style=g_config.menu_ui_style;
-            int visible=std::max(1,(M5.Display.height()-16)/(style==2?22:24));
+            int visible=std::max(1,int(M5.Display.height()-16)/(style==2?22:24));
             if (sel<scroll) scroll=sel;
             if (sel>=scroll+visible) scroll=sel-visible+1;
             auto bg=k85_get_bg(),fg=k85_get_fg(),accent=k85_get_accent();

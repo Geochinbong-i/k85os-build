@@ -41,6 +41,11 @@ static void navigation() {
     n.step(100,0,1,true);n.step(120,0,0,true);assert(n.step(371,0,0,true)==K85Nav::Select);
     n.reset();n.step(0,0,0,true);n.step(10,0,1,true);n.step(30,0,0,true);n.step(80,0,1,true);
     assert(n.step(100,0,0,true)==K85Nav::Back); assert(n.step(700,0,0,true)==K85Nav::None);
+    n.reset();n.step(0,0,0);n.step(10,0,1);n.step(30,0,0);n.step(60,1,0);
+    assert(n.step(80,0,0)==K85Nav::None);assert(n.step(281,0,0)==K85Nav::Next);
+    assert(n.step(282,0,0)==K85Nav::Select);assert(n.step(600,0,0)==K85Nav::None);
+    n.reset();n.step(0,0,0,true);n.step(10,0,1,true);n.step(30,0,0,true);n.step(60,1,0,true);
+    assert(n.step(80,0,0,true)==K85Nav::Next);assert(n.step(281,0,0,true)==K85Nav::Select);
     std::cout<<"BTN: single/double/long/chord/reset/wrap/swap/Legacy passed\n";
 }
 static void text() {

@@ -70,13 +70,25 @@ extern "C" void app_main(void) {
     k85_log("Boot start");
     k85_check_panic_screen();
 
-    if (!k85_fs_init()) {
+    while (!k85_fs_init()) {
         M5.Display.fillScreen(0x000000);
         M5.Display.setTextColor(0xFF0000, 0x000000);
         M5.Display.setCursor(4, 4);
-        M5.Display.println("LittleFS FAIL");
+        M5.Display.setTextSize(1);
+        M5.Display.println("LittleFS unavailable\nFiles retained\nA: retry mount\nB: USB recovery info");
         k85_post_beep(PostCode::LITTLEFS_MOUNT_FAIL);
-        return;
+        // 보존 모드에서는 포맷/설정 쓰기를 하지 않고 재시도와 USB 복구 안내만 제공한다.
+        bool retry=false;
+        while(!retry) {
+            M5.update();
+            if(M5.BtnA.wasPressed()) retry=true;
+            if(M5.BtnB.wasPressed()) {
+                M5.Display.fillScreen(0);
+                M5.Display.setCursor(2,2);
+                M5.Display.println("USB recovery\nRestore verified backup\nNo format performed\nA: retry mount");
+            }
+            vTaskDelay(pdMS_TO_TICKS(30));
+        }
     }
     k85_config_load();
     k85_apply_font(g_config.font_idx);

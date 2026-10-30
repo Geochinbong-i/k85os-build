@@ -14,13 +14,14 @@ class K85Navigation {
     bool pa=false, pb=false, gated=true, chord=false, chord_done=false;
     bool nav_long=false, second=false, pending=false;
     bool sel_used=false;
+    bool pending_select=false;
     uint32_t nav_start=0, tap_end=0, chord_start=0;
 public:
     void reset() { *this=K85Navigation(); }
     K85Nav step(uint32_t now, bool a, bool b, bool legacy=false, bool swap=false) {
         if (gated) { if (!a && !b) gated=false; pa=a; pb=b; return K85Nav::None; }
         if (a && b && !sel_used && !chord) {
-            chord=true; chord_done=false; chord_start=now; pending=false;
+            chord=true; chord_done=false; chord_start=now; pending=false; pending_select=false;
         }
         if (chord) {
             pa=a; pb=b;
@@ -34,6 +35,20 @@ public:
         bool nav=swap ? a:b, prevnav=swap ? pa:pb;
         if (legacy) { bool t=sel; sel=nav; nav=t; t=prevsel; prevsel=prevnav; prevnav=t; }
         K85Nav ev=K85Nav::None;
+        if (legacy) {
+            // Legacy의 A 이동과 B 확정 대기를 분리해 빠른 교차 입력이 유실되지 않게 한다.
+            if(nav && !prevnav) { nav_start=now; nav_long=false; }
+            if(nav && !nav_long && uint32_t(now-nav_start)>=K85_LONG_MS) { nav_long=true; ev=K85Nav::Previous; }
+            if(!nav && prevnav && !nav_long) ev=K85Nav::Next;
+            if(!sel && prevsel) {
+                if(pending && uint32_t(now-tap_end)<=K85_DOUBLE_MS) { pending=false; ev=K85Nav::Back; }
+                else { pending=true; tap_end=now; }
+            }
+            if(pending && !sel && uint32_t(now-tap_end)>K85_DOUBLE_MS && ev==K85Nav::None) {
+                pending=false; ev=K85Nav::Select;
+            }
+            pa=a; pb=b; return ev;
+        }
         if (nav && !prevnav) {
             nav_start=now; nav_long=false;
             second=pending && uint32_t(now-tap_end)<=K85_DOUBLE_MS;
@@ -49,16 +64,16 @@ public:
             second=false;
         }
         // Legacy는 A 이동/B 선택을 보존한다. B 두 번은 취소이므로 선택을 지연한다.
-        if (legacy) {
-            if (!nav && prevnav && !nav_long) { pending=false; ev=K85Nav::Next; }
-            if (!sel && prevsel) {
-                if (pending && uint32_t(now-tap_end)<=K85_DOUBLE_MS) { pending=false; ev=K85Nav::Back; }
-                else { pending=true; tap_end=now; }
-            }
-        } else if (!sel && prevsel) { sel_used=true; ev=K85Nav::Select; }
-        if (pending && !nav && !sel && uint32_t(now-tap_end)>K85_DOUBLE_MS) {
-            pending=false; ev=legacy ? K85Nav::Select:K85Nav::Next;
+        if (!sel && prevsel) {
+            sel_used=true;
+            if(pending) pending_select=true;
+            else ev=K85Nav::Select;
         }
+        if (pending && !nav && uint32_t(now-tap_end)>K85_DOUBLE_MS && ev==K85Nav::None) {
+            pending=false; ev=K85Nav::Next;
+        }
+        // 이동 판정 대기 중 눌린 Select는 이동 이벤트 다음 프레임에 전달한다.
+        if(pending_select && !pending && ev==K85Nav::None) { pending_select=false; ev=K85Nav::Select; }
         if (!a && !b) sel_used=false;
         pa=a; pb=b; return ev;
     }
