@@ -1,0 +1,107 @@
+dependencies:
+  chmorgan/esp-libhelix-mp3:
+    component_hash: cbb76089dc2c5749f7b470e2e70aedc44c9da519e04eb9a67d4c7ec275229e53
+    dependencies:
+    - name: idf
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=4.1.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.3
+  espressif/cjson:
+    component_hash: e788323270d90738662d66fffa910bfe1fba019bba087f01557e70c40485b469
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.7.19~2
+  espressif/esp_websocket_client:
+    component_hash: dc00233af846f3a744ada283a300e0d586040aadc3ee67361645ecdce4523672
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.8.0
+  espressif/mdns:
+    component_hash: ef0766474b37459f6ad22461e453a8713e780e831a7c993b16919d817988dff6
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.14.1
+  espressif/qrcode:
+    component_hash: 3b493771bc5d6ad30cbf87c25bf784aada8a08c941504355b55d6b75518ed7bc
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.1.0~2
+  idf:
+    source:
+      type: idf
+    version: 5.3.1
+  joltwallet/littlefs:
+    component_hash: e1a0f4a6adf821759cb34703a91107bbdce5d7ff6f4728f40ab012bb87842974
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.23.1
+  m5stack/m5gfx:
+    component_hash: e97781f48f14c6c65b90ba7cfe27deb3ff7eae8ec61a60040ab3615d166c82f4
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.2.36
+  m5stack/m5unified:
+    component_hash: 4fd004b68526b3af3df4f3a4f20ae8698517d3a70951fc9b1903c95473d1608d
+    dependencies:
+    - name: m5stack/m5gfx
+      registry_url: https://components.espressif.com/
+      require: private
+      version: '>=0.2.35'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.2.29
+  wolfssl/wolfssh:
+    dependencies: []
+    source:
+      path: /app/Geochinbong-i/k85os-build/components/wolfssl__wolfssh
+      type: local
+    version: 1.4.20
+  wolfssl/wolfssl:
+    dependencies: []
+    source:
+      path: /app/Geochinbong-i/k85os-build/components/wolfssl__wolfssl
+      type: local
+    version: 5.8.2~1
+direct_dependencies:
+- chmorgan/esp-libhelix-mp3
+- espressif/cjson
+- espressif/esp_websocket_client
+- espressif/mdns
+- espressif/qrcode
+- joltwallet/littlefs
+- m5stack/m5gfx
+- m5stack/m5unified
+- wolfssl/wolfssh
+- wolfssl/wolfssl
+manifest_hash: ef99247f75ef864dec9f8f6e4cb982fda73c2741c7077475be5468d5299e8181
+target: esp32s3
+version: 2.0.0

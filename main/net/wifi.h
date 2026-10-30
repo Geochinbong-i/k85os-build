@@ -11,6 +11,7 @@ bool k85_wifi_connect_saved(void);
 // Подключение к произвольным ssid/password, таймаут ~8с, блокирующая.
 // При успехе НЕ сохраняет в конфиг сама — сохранение делает вызывающий код (UI),
 // чтобы backend не решал за UI, когда персистить.
+bool k85_wifi_connect_interactive(const char *ssid,const char *password);
 bool k85_wifi_connect(const char *ssid, const char *password);
 
 // Блокирующий скан. Пишет до max_results SSID в ssids_out (каждый до 32 символов + \0),

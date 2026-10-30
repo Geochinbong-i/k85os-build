@@ -298,7 +298,8 @@ int k85_run_list_menu(const char *title, const char *const items[], int count,
     if (count <= 0) return -1;
 
     if (g_config.navigation_profile>=0) {
-        int sel=0,scroll=0; k85_nav_reset();
+        int sel=0,scroll=0,hover_pending=-1; int64_t hover_since=0,last_button=0;
+        k85_nav_reset(); k85_cursor_reset();
         while (true) {
             int style=g_config.menu_ui_style;
             int visible=std::max(1,(M5.Display.height()-16)/(style==2?22:24));
@@ -309,6 +310,18 @@ int k85_run_list_menu(const char *title, const char *const items[], int count,
             else if (style==2) draw_list_icons(title,items,count,score_keys,sel,scroll,bg,fg,accent,icon_fn);
             else draw_list_plain(title,items,count,score_keys,sel,scroll,bg,fg,accent);
             k85_input_update(); auto ev=k85_nav_take();
+            int64_t now=esp_timer_get_time();
+            if(ev!=K85Nav::None) last_button=now;
+            if(k85_cursor_active()) {
+                int old_x=k85_cursor_x(),old_y=k85_cursor_y(); k85_cursor_update();
+                bool moved=std::abs(k85_cursor_x()-old_x)+std::abs(k85_cursor_y()-old_y)>0;
+                int hover=hit_test_item(style,scroll,(sel/8)*8,count,k85_cursor_x(),k85_cursor_y());
+                if(hover>=0 && moved && now-last_button>600000) {
+                    if(hover_pending!=hover) { hover_pending=hover; hover_since=now; }
+                    else if(now-hover_since>120000) sel=hover;
+                }
+                k85_cursor_draw();
+            }
             if (ev==K85Nav::Back || ev==K85Nav::EmergencyBack) { k85_nav_reset(); return -1; }
             if (ev==K85Nav::Next) sel=(sel+1)%count;
             if (ev==K85Nav::Previous) sel=(sel+count-1)%count;

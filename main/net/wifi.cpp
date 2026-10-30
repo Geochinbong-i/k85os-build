@@ -1,5 +1,7 @@
 #include "wifi.h"
 #include "core/text_edit.h"
+#include "core/input.h"
+#include "esp_timer.h"
 #include "config.h"
 #include "log.h"
 #include "notifications.h"
@@ -91,7 +93,7 @@ void k85_wifi_init(void) {
 }
 
 // общая функция подключения, используется и в connect_saved, и в connect
-static bool wifi_do_connect(const char *ssid, const char *password) {
+static bool wifi_do_connect(const char *ssid, const char *password,bool interactive=false) {
     if (!password) password="";
     if (!k85edit::wifi_valid(ssid,password)) return false;
     if (!s_inited) k85_wifi_init();
@@ -117,10 +119,19 @@ static bool wifi_do_connect(const char *ssid, const char *password) {
         if (esp_wifi_start() == ESP_OK) esp_wifi_connect();
     }
 
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                            pdFALSE, pdFALSE, pdMS_TO_TICKS(20000));
-    return (bits & WIFI_CONNECTED_BIT) != 0;
+    const int64_t deadline=esp_timer_get_time()+20000000;
+    if(interactive) k85_nav_reset();
+    while(esp_timer_get_time()<deadline) {
+        EventBits_t bits=xEventGroupWaitBits(s_wifi_event_group,WIFI_CONNECTED_BIT|WIFI_FAIL_BIT,
+            pdFALSE,pdFALSE,pdMS_TO_TICKS(100));
+        if(bits&WIFI_CONNECTED_BIT) return true;
+        if(bits&WIFI_FAIL_BIT) return false;
+        if(interactive) {
+            k85_input_update();
+            if(k85_ui_cancel()) { esp_wifi_disconnect(); k85_wait_ab_release(); return false; }
+        }
+    }
+    return false;
 }
 
 bool k85_wifi_connect_saved(void) {
@@ -131,6 +142,9 @@ bool k85_wifi_connect_saved(void) {
     return wifi_do_connect(g_config.wifi_ssid, g_config.wifi_password);
 }
 
+bool k85_wifi_connect_interactive(const char *ssid,const char *password) {
+    return wifi_do_connect(ssid,password,true);
+}
 bool k85_wifi_connect(const char *ssid, const char *password) {
     return wifi_do_connect(ssid, password);
 }

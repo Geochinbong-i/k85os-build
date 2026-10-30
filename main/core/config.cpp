@@ -154,14 +154,17 @@ static bool encrypt_to_hex(const char *plain,char *out,size_t size) {
     memset(key,0,sizeof(key)); return ok;
 }
 static bool restore_secret(const char *encoded,char *out,size_t size) {
-    if(!out || !size) return false; out[0]=0;
+    if(!out || !size) { return false; }
+    out[0]=0;
     if(!encoded) return false;
     size_t n=strlen(encoded);
     if(!n) return true;
     if(strncmp(encoded,"gcm2:",5) && n<=63) {
         // 명시 버전 접두사는 모르는 형식이면 평문으로 오인하지 않는다.
         if(strchr(encoded,':') && !strncmp(encoded,"gcm",3)) return false;
-        if(n>=size) return false; memcpy(out,encoded,n+1); return true;
+        if(n>=size) { return false; }
+        memcpy(out,encoded,n+1);
+        return true;
     }
     unsigned char key[16]; if(!get_aes_key(key)) return false;
     bool ok=k85secret::decrypt(encoded,out,size,key); memset(key,0,sizeof(key)); return ok;
@@ -562,7 +565,7 @@ static cJSON *read_record(const char *path,uint64_t &generation) {
     auto sum=cJSON_DetachItemFromObjectCaseSensitive(root,"_checksum");
     if(!schema && !gen && !sum) { generation=0; return root; }
     char actual[65];
-    ok=cJSON_IsNumber(schema) && schema->valueint==2 && cJSON_IsNumber(gen) &&
+    ok=cJSON_IsNumber(schema) && schema->valuedouble==2 && cJSON_IsNumber(gen) &&
        std::isfinite(gen->valuedouble) && gen->valuedouble>=1 && gen->valuedouble<9007199254740991.0 &&
        floor(gen->valuedouble)==gen->valuedouble && cJSON_IsString(sum) && strlen(sum->valuestring)==64 &&
        checksum(root,actual) && strcmp(actual,sum->valuestring)==0;
@@ -610,7 +613,8 @@ static bool config_save_locked() {
     unsigned char current[32]; memory_digest(&g_config,current);
     if(s_has_digest && memcmp(current,s_digest,32)==0) return true;
     auto snapshot=static_cast<k85_config_t*>(malloc(sizeof(k85_config_t)));
-    if(!snapshot) return false; memcpy(snapshot,&g_config,sizeof(*snapshot)); validate_config(*snapshot);
+    if(!snapshot) { return false; }
+    memcpy(snapshot,&g_config,sizeof(*snapshot)); validate_config(*snapshot);
     cJSON *root=cfg_to_json(snapshot); memory_digest(snapshot,current); memset(snapshot,0,sizeof(*snapshot)); free(snapshot);
     if(!root) return false;
     if(s_retained) deep_merge(root,s_retained);

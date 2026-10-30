@@ -140,6 +140,11 @@ static void storage() {
     auto pos=file.find("\"brightness_active\":83");assert(pos!=std::string::npos);
     file.replace(pos,std::strlen("\"brightness_active\":83"),"\"brightness_active\":84");
     write("test-config.json.tmp",file);assert(k85_config_load());assert(g_config.brightness_active!=84);
+    assert(k85_config_load());g_config.brightness_active=71;assert(k85_config_save());
+    write("manual-backup.json",read("test-config.json"));g_config.brightness_active=91;assert(k85_config_save());
+    assert(k85_config_restore_file("manual-backup.json"));assert(g_config.brightness_active==71);
+    assert(k85_config_load());assert(g_config.brightness_active==71);
+    write("bad-backup.json","{broken");assert(!k85_config_restore_file("bad-backup.json"));assert(g_config.brightness_active==71);
     std::cout<<"CFG: legacy import/unknown keys/secrets, no-op save, six I/O failure points, NVS failure, corrupt main/tmp recovery passed\n";
 }
 int main() {navigation();text();imu();secrets();storage();std::cout<<"All host checks passed\n";}

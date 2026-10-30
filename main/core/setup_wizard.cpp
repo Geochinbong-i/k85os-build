@@ -85,7 +85,7 @@ static K85SetupResult step_wifi(void) {
         if (!k85_text_input("Enter password:", "", password, sizeof(password), K85TextOptions{true,63,true})) continue;
 
         k85_show_message("Connecting...");
-        bool ok = k85_wifi_connect(ssids[sidx], password);
+        bool ok = k85_wifi_connect_interactive(ssids[sidx], password);
         if (ok) {
             snprintf(g_config.wifi_ssid, sizeof(g_config.wifi_ssid), "%s", ssids[sidx]);
             snprintf(g_config.wifi_password, sizeof(g_config.wifi_password), "%s", password);

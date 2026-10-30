@@ -761,20 +761,12 @@ static int desktop_hit_test(int count) {
 static int64_t s_desktop_edge_last_us = 0;
 
 void k85_menu_desktop_tick(void) {
-    if (g_config.navigation_profile==0) {
-        auto ev=k85_nav_take();
-        if (ev==K85Nav::Next) k85_menu_next();
-        if (ev==K85Nav::Previous) k85_menu_prev();
-        if (ev==K85Nav::Select) { k85_menu_activate(); k85_nav_reset(); }
-        if (ev==K85Nav::Back || ev==K85Nav::EmergencyBack) k85_nav_reset();
-        k85_menu_draw(); return;
-    }
     if (k85_cursor_active()) k85_cursor_update();
 
     const char *items[K85_MENU_ITEM_COUNT];
     int count = get_filtered_menu(items, K85_MENU_ITEM_COUNT);
 
-    if (count > 0) {
+    if (count > 0 && k85_cursor_active()) {
         int hover = desktop_hit_test(count);
         int64_t now = esp_timer_get_time();
         if (hover >= 0) {
@@ -809,12 +801,12 @@ void k85_menu_desktop_tick(void) {
     }
 
     draw_menu_desktop_icons(items, count);
-    k85_cursor_draw();
-
-    if (count > 0 && k85_btn_a_pressed()) {
-        k85_wake_screen();
-        run_action(s_selected);
-    }
+    if(k85_cursor_active()) k85_cursor_draw();
+    auto event=k85_nav_take();
+    if(event==K85Nav::Next) k85_menu_next();
+    if(event==K85Nav::Previous) k85_menu_prev();
+    if(event==K85Nav::Back || event==K85Nav::EmergencyBack) k85_nav_reset();
+    if(count>0 && event==K85Nav::Select) { run_action(s_selected); k85_nav_reset(); }
 }
 
 void k85_menu_activate(void) {

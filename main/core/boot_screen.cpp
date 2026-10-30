@@ -241,9 +241,9 @@ static void draw_boot_menu(int selected, int seconds_left) {
     M5.Display.setTextColor(0x777777, bg);
     M5.Display.setCursor(10, y + 10);
     if (seconds_left > 0) {
-        M5.Display.printf("Auto-boot in %ds  A=select B=confirm", seconds_left);
+        M5.Display.printf("Auto %ds %s", seconds_left,k85_nav_hint());
     } else {
-        M5.Display.print("A=select B=confirm");
+        M5.Display.print(k85_nav_hint());
     }
 }
 
@@ -281,7 +281,7 @@ static void draw_boot_menu_bios(int selected, int seconds_left) {
         M5.Display.printf("Auto-boot %ds", seconds_left);
     }
     M5.Display.setCursor(4, M5.Display.height() - 10);
-    M5.Display.print("A=next B=select");
+    M5.Display.print(k85_nav_hint());
 }
 
 // ---------- GRUB-style ----------
@@ -360,7 +360,7 @@ static void draw_boot_menu_refind(int selected, int seconds_left) {
 
     M5.Display.setTextColor(0x888888, bg);
     M5.Display.setCursor(4, h - 12);
-    M5.Display.print("A=next B=boot");
+    M5.Display.print(k85_nav_hint());
     if (seconds_left > 0) {
         M5.Display.setCursor(w - 40, h - 12);
         M5.Display.printf("%ds", seconds_left);
